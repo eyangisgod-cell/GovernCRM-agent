@@ -1,7 +1,6 @@
 .claude/
 .cursor/
 .trellis/
-docs/
 
 # Python
 __pycache__/
