@@ -74,7 +74,7 @@ migrate: ## 按序应用 migrations/*.sql（幂等；迁移唯一写者见 datab
 ## ------------------------------------------------------------- 门禁项 ----
 
 test: ## ① pytest（默认排除需要真 PG 的用例）
-	$(UV) run pytest -q || test $$? -eq 5
+	$(UV) run pytest -q
 
 lint: ## ② ruff lint + 依赖白名单扫描
 	$(UV) run ruff check .
@@ -91,7 +91,9 @@ typecheck: ## ④ mypy 类型检查
 
 pg-test: ## ⑤ 真 PostgreSQL 集成测试（append-only 触发器 / 哈希链 / CHECK 约束）
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
-	DATABASE_URL="$${DATABASE_URL:-$(DATABASE_URL)}" $(UV) run pytest -m pg -q || test $$? -eq 5
+	url="$${DATABASE_URL:-$(DATABASE_URL)}"; \
+	if [ -z "$$url" ]; then echo "pg-test: DATABASE_URL is empty" >&2; exit 1; fi; \
+	DATABASE_URL="$$url" $(UV) run pytest -m pg -q
 
 scan-deps: ## ⑥ 零供应商依赖 + 依赖白名单扫描（可单独执行）
 	$(UV) run python scripts/check_dependencies.py --verbose

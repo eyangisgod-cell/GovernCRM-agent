@@ -52,7 +52,12 @@ CORE_TABLES: tuple[str, ...] = (
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
-        pytest.skip("未设置 DATABASE_URL，跳过真 PG 用例")
+        # 不用 skip：可跳过的门等于没有门（v5.3 §F.4 ⑥⑦）。
+        # PG 门禁是硬门禁，连不上就当失败，而不是悄悄放行。
+        pytest.fail(
+            "未设置 DATABASE_URL，真 PG 门禁无法执行。"
+            "请先 `cp .env.example .env` 并 `docker compose up -d`，再跑 `make pg-test`。"
+        )
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
 
 

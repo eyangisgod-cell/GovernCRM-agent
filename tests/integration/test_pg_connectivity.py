@@ -19,7 +19,11 @@ pytestmark = pytest.mark.pg
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
-        pytest.skip("未设置 DATABASE_URL，跳过真 PG 用例")
+        # 不用 skip：可跳过的门等于没有门（v5.3 §F.4 ⑥⑦）。门禁连不上即失败。
+        pytest.fail(
+            "未设置 DATABASE_URL，真 PG 门禁无法执行。"
+            "请先 `cp .env.example .env` 并 `docker compose up -d`，再跑 `make pg-test`。"
+        )
     # SQLAlchemy 风格的 URL 转成 psycopg 能吃的形式
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
 
