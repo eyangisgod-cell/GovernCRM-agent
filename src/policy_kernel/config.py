@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,11 @@ class Field:
     exclusive_minimum: bool = False
     maximum: float | None = None
     allowed: tuple[Any, ...] | None = None
+    #: 列表的**精确内容**（含顺序）。非 None 时列表必须与之逐项相等——
+    #: 用于附录D 冻结的三键排序这类「顺序不可改」的配置项。
+    exact: tuple[Any, ...] | None = None
+    #: 列表的最小元素个数。空列表会让配置失去意义，必须拒绝。
+    min_items: int | None = None
 
 
 SCHEMA: dict[str, Field] = {
@@ -143,7 +149,10 @@ SCHEMA: dict[str, Field] = {
     ),
     # 三、冲突消解
     "conflict_resolution.tie_break_order": Field(
-        _STR_LIST, "三键排序顺序（附录D 规则 3），顺序不可改"
+        _STR_LIST,
+        "三键排序顺序（附录D 规则 3），顺序不可改",
+        allowed=("platform_layer_score", "benefit_net_value", "created_at_earliest"),
+        exact=("platform_layer_score", "benefit_net_value", "created_at_earliest"),
     ),
     "conflict_resolution.platform_priority_overrides": Field(
         _DICT, "平台优先级覆盖（数值小者优先）；未列出的平台走三键"
@@ -173,7 +182,10 @@ SCHEMA: dict[str, Field] = {
     ),
     # 八、自主度
     "autonomy.mvp_allowed_levels": Field(
-        _STR_LIST, "MVP 开放的自主度等级", allowed=("L0", "L1", "L2", "L3")
+        _STR_LIST,
+        "MVP 开放的自主度等级",
+        allowed=("L0", "L1", "L2", "L3"),
+        min_items=1,
     ),
 }
 
@@ -309,6 +321,24 @@ def _validate_leaf(path: str, spec: Field, value: Any, where: str) -> None:
             f"  期望：{_type_name(spec.kind)}，实际拿到 {type(value).__name__}（{value!r}）。\n"
             f"  请在 governance.yaml 的 `{_parent_of(path)}` 段改这一项。"
         )
+    if spec.min_items is not None and isinstance(value, list) and len(value) < spec.min_items:
+        raise ConfigError(
+            f"{where}：配置项 `{path}` 元素太少。\n"
+            f"  用途：{spec.desc}\n"
+            f"  实际 {len(value)} 个（{value!r}），要求至少 {spec.min_items} 个。\n"
+            f"  请在 governance.yaml 的 `{_parent_of(path)}` 段补齐——空列表会让该配置失去意义。"
+        )
+    if spec.exact is not None:
+        actual = tuple(value) if isinstance(value, list) else (value,)
+        if actual != spec.exact:
+            raise ConfigError(
+                f"{where}：配置项 `{path}` 与冻结值不一致。\n"
+                f"  用途：{spec.desc}\n"
+                f"  实际值：{list(actual)}\n"
+                f"  冻结值：{list(spec.exact)}\n"
+                f"  该配置项是**冻结语义**，内容与顺序都不可改。\n"
+                f"  请在 governance.yaml 的 `{_parent_of(path)}` 段恢复为冻结值。"
+            )
     if spec.allowed is not None:
         checked = tuple(value) if isinstance(value, list) else (value,)
         bad = [item for item in checked if item not in spec.allowed]
@@ -482,10 +512,15 @@ def load_and_validate(path: str | Path = "governance.yaml") -> GovernanceConfig:
 
 
 def _flatten_overrides(overrides: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """摊平覆盖项。空 dict **作为叶子保留**（与 `_flatten` 一致）。
+
+    否则 `{"platform_priority_overrides": {}}` 这类「清空某项」的覆盖会被
+    摊平成零个叶子，覆盖项凭空消失。
+    """
     out: dict[str, Any] = {}
     for key, value in overrides.items():
         path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
+        if isinstance(value, dict) and value:
             out.update(_flatten_overrides(value, path))
         else:
             out[path] = value
@@ -534,13 +569,18 @@ def apply_overrides(
             + "\n".join(f"  - `{path}`" for path in sorted(OVERRIDABLE_PATHS))
         )
 
-    import copy
-
     merged = copy.deepcopy(base)
     for path, value in leaves.items():
-        node: dict[str, Any] = merged
         parts = path.split(".")
+        node: dict[str, Any] = merged
         for part in parts[:-1]:
+            if part not in node or not isinstance(node[part], dict):
+                raise ConfigError(
+                    f"{source} 的覆盖项 `{path}` 在基础配置里找不到父级 `{part}`。\n"
+                    f"  基础配置缺少这一段，无法落位。\n"
+                    f"  请确认基础配置来自当前版本的 governance.yaml，"
+                    f"或改用允许覆盖的路径（见下方白名单）。"
+                )
             node = node[part]
         node[parts[-1]] = value
     return merged

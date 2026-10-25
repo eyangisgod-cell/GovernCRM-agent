@@ -116,6 +116,8 @@ jobs:
         run: make migrate
       - name: make pg-test
         run: make pg-test
+      - name: 哈希链全链校验（红线③）
+        run: make verify-chain
 
   # 权威阻断门禁：六项聚合。未过即阻断合并，不得设 continue-on-error / allow-failure。
   make-check:

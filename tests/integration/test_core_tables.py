@@ -21,9 +21,11 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, Integer, Numeric, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 
+from src.audit.hash_chain import GENESIS_HASH, insert_statement_sql
 from src.models import Base
 
 pytestmark = pytest.mark.pg
@@ -68,24 +70,38 @@ def conn() -> Iterator[psycopg.Connection[tuple[object, ...]]]:
 
 
 def _insert_audit_row(conn: psycopg.Connection[tuple[object, ...]]) -> uuid.UUID:
+    """写入一条**链上合法**的审计记录。
+
+    走 `src.audit.hash_chain` 的统一口径（record_hash 由数据库算），
+    免得测试数据自己把哈希链弄脏——`scripts/verify_hash_chain.py` 要能跑绿。
+    """
+    tenant_id = uuid.uuid4()
     with conn.cursor() as cur:
         cur.execute(
-            """
-            insert into audit_log (
-                tenant_id, trace_id, actor_type, action_type,
-                model_version, prompt_version, skill_version, rule_version,
-                prev_hash, record_hash
-            ) values (
-                %s, %s, 'user', 'test_insert',
-                'test/model@1', 'git:abc1234', 'git:def5678', 'governance.yaml@1',
-                %s, %s
-            ) returning audit_id
-            """,
+            insert_statement_sql(),
             (
-                uuid.uuid4(),
-                f"trace-{uuid.uuid4()}",
-                "0" * 64,
-                "a" * 64,
+                tenant_id,  # tenant_id
+                f"trace-{uuid.uuid4()}",  # trace_id
+                None,  # task_id
+                None,  # worker_id
+                None,  # decision_id
+                None,  # approval_id
+                "user",  # actor_type
+                None,  # actor_id
+                None,  # actor_role
+                "test_insert",  # action_type
+                None,  # object_type
+                None,  # object_id
+                [],  # hit_rule_ids
+                "test/model@1",  # model_version
+                "git:abc1234",  # prompt_version
+                "git:def5678",  # skill_version
+                "governance.yaml@1",  # rule_version
+                Jsonb({}),  # input_snapshot
+                Jsonb({}),  # evidence
+                Jsonb({}),  # payload
+                "sha256",  # hash_algo
+                GENESIS_HASH,  # prev_hash
             ),
         )
         row = cur.fetchone()

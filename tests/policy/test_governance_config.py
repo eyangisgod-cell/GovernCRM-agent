@@ -238,6 +238,64 @@ def test_overridable_path_is_applied() -> None:
     assert base["budget"]["per_task_token_limit"] == 500000, "入参不得被修改"
 
 
+# ---------------------------------------------------------------------------
+# 回归：评审发现的 4 个 P1 缺陷（缺陷编号与评审报告一致）
+# ---------------------------------------------------------------------------
+
+
+def test_b1_empty_list_is_rejected(tmp_path: Path, valid_raw: dict[str, Any]) -> None:
+    """B1：空列表曾被静默接受——`allowed` 检查用列表推导，空列表 → bad=[] → 不报错。"""
+    valid_raw["autonomy"]["mvp_allowed_levels"] = []
+    with pytest.raises(ConfigError) as excinfo:
+        load_and_validate(_write(tmp_path, valid_raw))
+    message = str(excinfo.value)
+    assert "元素太少" in message
+    assert "autonomy.mvp_allowed_levels" in message
+
+
+def test_b2_tie_break_order_must_match_frozen_value(
+    tmp_path: Path, valid_raw: dict[str, Any]
+) -> None:
+    """B2：三键排序曾接受任意字符串——附录D 规则 3 的顺序可被悄悄改掉。"""
+    valid_raw["conflict_resolution"]["tie_break_order"] = ["foo", "bar"]
+    with pytest.raises(ConfigError) as excinfo:
+        load_and_validate(_write(tmp_path, valid_raw))
+    message = str(excinfo.value)
+    assert "冻结值" in message
+    assert "platform_layer_score" in message
+
+
+def test_b2_tie_break_order_rejects_reordering(tmp_path: Path, valid_raw: dict[str, Any]) -> None:
+    """B2 续：三键元素对但顺序变了，同样必须拒绝。"""
+    valid_raw["conflict_resolution"]["tie_break_order"] = [
+        "benefit_net_value",
+        "platform_layer_score",
+        "created_at_earliest",
+    ]
+    with pytest.raises(ConfigError) as excinfo:
+        load_and_validate(_write(tmp_path, valid_raw))
+    assert "冻结值" in str(excinfo.value)
+
+
+def test_b3_missing_parent_key_raises_actionable_error() -> None:
+    """B3：父键缺失曾抛裸 KeyError，调用方拿不到任何上下文。"""
+    with pytest.raises(ConfigError) as excinfo:
+        apply_overrides({}, _nest({"benefit.floor": 0}))
+    message = str(excinfo.value)
+    assert "找不到父级" in message
+    assert "benefit" in message
+
+
+def test_b4_empty_dict_override_is_not_silently_dropped() -> None:
+    """B4：空 dict 覆盖曾被摊平成零个叶子，覆盖项凭空消失。"""
+    base = {"conflict_resolution": {"platform_priority_overrides": {"taobao": 10}}}
+    merged = apply_overrides(base, _nest({"conflict_resolution.platform_priority_overrides": {}}))
+    assert merged["conflict_resolution"]["platform_priority_overrides"] == {}
+    assert base["conflict_resolution"]["platform_priority_overrides"] == {"taobao": 10}, (
+        "入参不得被修改"
+    )
+
+
 def test_redline_rule_ids_are_frozen() -> None:
     """五条红线 ID 与附录D §4 登记表一致；增删需同改基准并过回归门禁。"""
     assert REDLINE_RULE_IDS == (

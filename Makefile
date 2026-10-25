@@ -34,7 +34,7 @@ PG_PORT ?= 5432
 DATABASE_URL ?= postgresql+psycopg://$(PG_USER):$(PG_PASSWORD)@127.0.0.1:$(PG_PORT)/$(PG_DB)
 
 .PHONY: help sync up down logs db-shell migrate \
-        test lint format-check format typecheck pg-test check scan-deps clean
+        test lint format-check format typecheck pg-test verify-chain check scan-deps clean
 
 ## ---------------------------------------------------------------- 基础 ----
 
@@ -95,12 +95,18 @@ pg-test: ## ⑤ 真 PostgreSQL 集成测试（append-only 触发器 / 哈希链 
 	if [ -z "$$url" ]; then echo "pg-test: DATABASE_URL is empty" >&2; exit 1; fi; \
 	DATABASE_URL="$$url" $(UV) run pytest -m pg -q
 
+verify-chain: ## 哈希链全链校验（失败即阻断，红线③的可验证形态）
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
+	url="$${DATABASE_URL:-$(DATABASE_URL)}"; \
+	if [ -z "$$url" ]; then echo "verify-chain: DATABASE_URL is empty" >&2; exit 1; fi; \
+	DATABASE_URL="$$url" $(UV) run python scripts/verify_hash_chain.py
+
 scan-deps: ## ⑥ 零供应商依赖 + 依赖白名单扫描（可单独执行）
 	$(UV) run python scripts/check_dependencies.py --verbose
 
 ## --------------------------------------------------------------- 聚合 ----
 
-check: test lint format-check typecheck pg-test ## 全量门禁（本地与 CI 同一入口）
+check: test lint format-check typecheck pg-test verify-chain ## 全量门禁（本地与 CI 同一入口）
 	@echo "make check: all gates green"
 
 clean: ## 清理缓存与构建产物
