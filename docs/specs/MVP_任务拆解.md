@@ -319,7 +319,7 @@
 | 项 | 值 |
 |---|-----|
 | 依赖 | T0.4, 附录D 冻结版 |
-| 产出文件 | `tests/evaluation/benchmark.yaml`（源自 `docs/specs/评测标注基准_v1.2.yaml`）+ `tests/evaluation/path_assertions.yaml` |
+| 产出文件 | `tests/evaluation/benchmark.yaml`（源自 `docs/specs/评测标注基准_v1.3.yaml`）+ `tests/evaluation/path_assertions.yaml` |
 | 规格 | ① **策略判定 20 条**（15 简单 + 5 边界）→ 一致率分母；② **路径断言 5 条**（跳过各必经节点的用例，单独文件）→ **独立验收，不计入一致率分母**。rule_id 全部取自附录D §4 登记表 |
 | **对照口径** | CI 比对三要素全部一致：① `conclusion` 完全相同 ② `hit_rule_ids` 集合相同 ③ `suppressed_rule_ids` 集合相同 + `suppressed_candidates` 数量相同 |
 | **纪律** | **标注先于内核入库**——本任务必须在 T-B2 之前完成，否则一致率是循环论证 |

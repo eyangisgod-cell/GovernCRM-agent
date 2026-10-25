@@ -1,9 +1,9 @@
-# GovernCRM 策略评测标注基准 v1.2
-# 冻结日期: 2026-10-24
+# GovernCRM 策略评测标注基准 v1.3
+# 冻结日期: 2026-10-25（v1.2 于 2026-10-24 冻结；v1.3 = 5 条边界样本逐条拍板后的定稿）
 # rule_version: "2026-10-24.frozen"
 # 标注纪律: 本文件先于 policy_kernel 入库。CI 用本文件对照内核输出，一致率须 100%。
-# 生产方式: AI 起草 (按 GovernCRM_附录D_冻结版.md) → eyangisgod review
-# 5 条边界样本(*) 建议 eyangisgod 亲自标注
+# 生产方式: AI 起草 (按 GovernCRM_附录D_冻结版.md) → eyangisgod 逐条拍板（2026-10-25）
+# 5 条边界样本(*) 期望值已由 eyangisgod 逐条确认（2026-10-25）
 
 # ─── 分层口径（裁决 #11，用于校验 global_segment / platform_segment 字段）───
 # 消费金额档: high(≥500) / mid(100-500) / low(<100)
@@ -109,7 +109,7 @@ benchmarks:
       explicit_refusal: true
       has_marketing_consent: true      # 有授权，但明示拒绝仍 DENY
     candidates:
-      - platform: jd
+      - platform: douyin
         coupon_value: 15
         coupon_threshold: 50
         created_at: "2026-10-23T10:00:00Z"
@@ -134,7 +134,7 @@ benchmarks:
       explicit_refusal: false
       has_marketing_consent: false
     candidates:
-      - platform: jd
+      - platform: douyin
         coupon_value: 15
         coupon_threshold: 50
         created_at: "2026-10-23T10:00:00Z"
@@ -184,7 +184,7 @@ benchmarks:
       explicit_refusal: false
       has_marketing_consent: true
     candidates:
-      - platform: jd
+      - platform: douyin
         coupon_value: 25
         coupon_threshold: 150
         created_at: "2026-10-23T10:00:00Z"
@@ -265,7 +265,7 @@ benchmarks:
         created_at: "2026-10-23T10:00:00Z"
         channel: sms
         platform_segment: "amount_mid_recent"    # 层级分 23
-      - platform: jd
+      - platform: douyin
         coupon_value: 15
         coupon_threshold: 80
         created_at: "2026-10-23T09:00:00Z"
@@ -280,7 +280,7 @@ benchmarks:
       hit_rule_ids: []
       suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]   # 被抑制的是另一候选，不是本候选命中
       suppressed_candidates: 1
-      note: "键①平台局部层级：淘系 mid(23) > 京东 low(13) → 淘系胜出，无需比净值"
+      note: "键①平台局部层级：淘系 mid(23) > 抖店 low(13) → 淘系胜出，无需比净值"
 
   - id: S10
     description: "层级与净值均平 → 创建时间早者胜"
@@ -299,7 +299,7 @@ benchmarks:
         created_at: "2026-10-23T10:00:00Z"
         channel: sms
         platform_segment: "amount_mid_recent"
-      - platform: jd
+      - platform: douyin
         coupon_value: 25
         coupon_threshold: 100
         created_at: "2026-10-23T09:00:00Z"     # 更早
@@ -310,7 +310,7 @@ benchmarks:
     last_touch_at: null
     global_segment: "amount_mid_recent"
     expected:
-      conclusion: ALLOW          # jd 候选放行（键③ 早）
+      conclusion: ALLOW          # douyin 候选放行（键③ 早）
       hit_rule_ids: []
       suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
       suppressed_candidates: 1
@@ -333,7 +333,7 @@ benchmarks:
         created_at: "2026-10-23T10:00:00Z"
         channel: sms
         platform_segment: "amount_mid_recent"
-      - platform: jd
+      - platform: douyin
         coupon_value: 30
         coupon_threshold: 300
         created_at: "2026-10-23T09:00:00Z"
@@ -348,7 +348,7 @@ benchmarks:
       hit_rule_ids: []
       suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
       suppressed_candidates: 1
-      note: "键①同。键②净值：淘系=30−max(0,150−200)=30−0=30；京东=30−max(0,300−200)=30−100=0 → 淘系胜出"
+      note: "键①同。键②净值：淘系=30−max(0,150−200)=30−0=30；抖店=30−max(0,300−200)=30−100=0 → 淘系胜出"
 
   - id: S12
     description: "两券净值均为0 → 按创建时间早者"
@@ -367,7 +367,7 @@ benchmarks:
         created_at: "2026-10-23T10:00:00Z"
         channel: sms
         platform_segment: "amount_low_recent"
-      - platform: jd
+      - platform: douyin
         coupon_value: 25
         coupon_threshold: 250
         created_at: "2026-10-23T09:00:00Z"
@@ -378,11 +378,11 @@ benchmarks:
     last_touch_at: null
     global_segment: "amount_low_recent"
     expected:
-      conclusion: ALLOW          # jd 候选（净值同为0，按时间早）
+      conclusion: ALLOW          # douyin 候选（净值同为0，按时间早）
       hit_rule_ids: []
       suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
       suppressed_candidates: 1
-      note: "净值下限0：淘系=20−150=−130→0；京东=25−200=−175→0 → 键②平 → 键③时间早(09:00)胜出"
+      note: "净值下限0：淘系=20−150=−130→0；抖店=25−200=−175→0 → 键②平 → 键③时间早(09:00)胜出"
 
   - id: S13
     description: "全局层级高、平台局部层级低 → 权益按更高层（全局）执行"
@@ -462,7 +462,7 @@ benchmarks:
       suppressed_rule_ids: []
       note: "规则1：四红线(1a)与 NO_CONSENT(1b) 均命中 → DENY，且写 suppression_record 时全量记录两个 rule_id，不只记第一个"
 
-  # ═══════════ 边界样本 (5条, 建议 eyangisgod 亲自标注) ═══════════
+  # ═══════════ 边界样本 (5条, 已由 eyangisgod 逐条拍板 2026-10-25) ═══════════
 
   - id: B01  # (*)
     description: "*边界: 三键全平（层级同+净值同+时间同）→ 升级人工"
@@ -481,7 +481,7 @@ benchmarks:
         created_at: "2026-10-23T10:00:00.000Z"
         channel: sms
         platform_segment: "amount_mid_recent"
-      - platform: jd
+      - platform: douyin
         coupon_value: 25
         coupon_threshold: 100
         created_at: "2026-10-23T10:00:00.000Z"     # 同一毫秒
@@ -496,7 +496,8 @@ benchmarks:
       hit_rule_ids: ["ESCALATE_HUMAN"]
       suppressed_rule_ids: []
       suppressed_candidates: 0
-      note: "键①同层、键②净值同(25−0=25)、键③同一时刻 → 规则6升级人工(E5)，不默认放行。eyangisgod: 请确认"
+      allowed_platform: null       # 无候选放行：全部挂起转人工
+      note: "键①同层、键②净值同(25−0=25)、键③同一时刻 → 规则6升级人工(E5)，不默认放行。已拍板（2026-10-25）：期望值确认"
 
   - id: B02  # (*)
     description: "*边界: 频控恰好第3次 → DENY"
@@ -521,7 +522,7 @@ benchmarks:
     expected:
       conclusion: DENY
       hit_rule_ids: ["FREQ_GLOBAL_7D"]
-      note: "7天滚动窗口内触达2次，本次为第3次 → 超出 ≤2 上限 → DENY。eyangisgod: 请确认"
+      note: "7天滚动窗口内触达2次，本次为第3次 → 超出 ≤2 上限 → DENY。已拍板（2026-10-25）：期望值确认"
 
   - id: B03  # (*)
     description: "*边界: 同通道距上次 71h59min（<72h）→ DENY"
@@ -541,19 +542,19 @@ benchmarks:
         channel: sms
     touch_history_7d: 1
     last_touch_channel: sms
-    last_touch_at: "2026-10-20T10:01:00Z"    # 距 10-23T10:00 = 71h59min < 72h
+    last_touch_at: "2026-10-20T12:01:00Z"    # 距 now(10-23T12:00) 恰 71h59min < 72h
     global_segment: "amount_mid_recent"
     expected:
       conclusion: DENY
       hit_rule_ids: ["FREQ_GLOBAL_7D"]
-      note: "同通道冷却 72h 未满（71h59min）→ DENY。eyangisgod: 请确认（71h59min 距 72h 仅差1分钟，是最刁钻的边界）"
+      note: "同通道冷却 72h 未满（距 now 恰 71h59min）→ DENY。已拍板（2026-10-25）：last_touch_at 修正为 2026-10-20T12:01Z，贴住 72h 边界"
 
   - id: B04  # (*)
     description: "*边界: 全局抑制 vs 平台无抑制 → 抑制取严 → DENY"
     customer:
       avg_order_value_90d: 40
       last_purchase_days_ago: 150
-      total_spend_percentile: 15
+      total_spend_percentile: 0.5             # Top 1% 内，与 SUP_HIGH_VALUE 口径自洽
       complaint_count_30d: 0
       refund_rate: 0.03
       explicit_refusal: false
@@ -574,7 +575,7 @@ benchmarks:
     expected:
       conclusion: DENY
       hit_rule_ids: ["SUP_HIGH_VALUE"]
-      note: "规则4分维度：抑制取更严一档 → 全局层 DENY 胜出。eyangisgod: 请确认（这是层级分歧的抑制侧，与 S13/S14 的权益侧互为对照）"
+      note: "规则4分维度：抑制取更严一档 → 全局层 DENY 胜出。已拍板（2026-10-25）：期望值确认；total_spend_percentile 改为 0.5（Top 1% 内），使显式 global_suppression 与字段推导两条路径口径自洽（层级分歧的抑制侧，与 S13/S14 的权益侧互为对照）"
 
   - id: B05  # (*)
     description: "*边界: 平台优先级覆盖 (platform_priority_overrides) 生效"
@@ -593,10 +594,10 @@ benchmarks:
         created_at: "2026-10-23T10:00:00Z"     # 淘系更晚
         channel: sms
         platform_segment: "amount_mid_recent"
-      - platform: jd
+      - platform: douyin
         coupon_value: 25
         coupon_threshold: 100
-        created_at: "2026-10-23T09:00:00Z"    # 京东更早
+        created_at: "2026-10-23T09:00:00Z"    # 抖店更早
         channel: email
         platform_segment: "amount_mid_recent"
     touch_history_7d: 0
@@ -605,27 +606,36 @@ benchmarks:
     global_segment: "amount_mid_recent"
     governance_overrides:
       platform_priority_overrides:
-        jd: 200        # 显式配置把京东优先级提到淘系之上
+        taobao: 200        # 显式配置把淘系优先级提到抖店之上
     expected:
-      conclusion: ALLOW          # jd 候选（覆盖项优先于三键）
+      conclusion: ALLOW          # taobao 候选（覆盖项优先于三键；与键③"早者胜"结论相反）
+      allowed_platform: taobao   # 显式断言放行候选——覆盖失效时本条必须失败
       hit_rule_ids: []
       suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
       suppressed_candidates: 1
-      note: "规则3兜底：governance.yaml 的 platform_priority_overrides 生效，优先于三键。eyangisgod: 请确认"
+      note: "规则3兜底：platform_priority_overrides 优先于三键——三键(键③早者胜)指向抖店，覆盖指向淘系，二者反向 → 唯一正确答案=淘系。已拍板（2026-10-25）：覆盖项改指 taobao，使本条具备判别力"
 
 # ═══════════ 元信息 ═══════════
 meta:
-  version: "1.2"
+  version: "1.3"
   total_samples: 20
   simple_samples: 15
   boundary_samples: 5
-  frozen_at: "2026-10-24"
+  frozen_at: "2026-10-25"
   rule_version: "2026-10-24.frozen"
   rule_source: "docs/specs/GovernCRM_附录D_冻结版.md"
-  review_status: "AI草案待eyangisgod审核"
-  boundary_review_note: "B01-B05 为边界样本，建议 eyangisgod 亲自确认每条期望值"
+  review_status: "已由 eyangisgod 逐条拍板（2026-10-25）"
+  boundary_review_note: "B01-B05 期望值已由 eyangisgod 于 2026-10-25 逐条确认；B02 期望值一次通过，B01/B03/B04/B05 按拍板意见修订"
   rule_id_registry: "docs/specs/GovernCRM_附录D_冻结版.md §4 规则 ID 登记表"
-  comparison_rule: "CI 对照口径：conclusion 必须完全一致；hit_rule_ids 必须完全一致（集合）；suppressed_rule_ids 必须完全一致（集合）；suppressed_candidates 数量必须一致"
+  comparison_rule: "CI 对照口径：conclusion 必须完全一致；hit_rule_ids 必须完全一致（集合）；suppressed_rule_ids 必须完全一致（集合）；suppressed_candidates 数量必须一致；allowed_platform 存在时必须与实际放行候选一致（缺省视为不校验）"
+  known_gap: "简单样本(S01-S15)的多候选胜者未以字段断言，仅在 note 中描述——规则3 选错胜者但结论仍 ALLOW 时不会触发失败。v1.3 仅对 B01/B05 引入 allowed_platform 断言；补齐简单样本字段留待后续版本"
+  v13_changes:
+    - "B01-B05 期望值由 eyangisgod 于 2026-10-25 逐条拍板；B02 一次通过"
+    - "B03 落实 v1.2 变更记录声明但未落地的修正：last_touch_at 由 2026-10-20T10:01Z 改为 2026-10-20T12:01Z（距 now 恰 71h59m < 72h，DENY 成立）"
+    - "B04 total_spend_percentile 由 15 改为 0.5（Top 1% 内），使显式 global_suppression 与字段推导两条路径口径自洽，避免实现差异导致 CI 红"
+    - "B05 platform_priority_overrides 由 douyin 改指 taobao：覆盖结论与键③『早者胜』结论反向，使本条对『覆盖优先于三键』具备判别力（原设计两者同向，覆盖失效时测试仍会通过）"
+    - "平台口径统一：jd → douyin（全量），与合成数据生成器与产品主线（淘系+抖店+企微）一致"
+    - "新增可选字段 allowed_platform（B01=null / B05=taobao），并写入 comparison_rule：存在时必须一致，缺省不校验"
   v12_changes:
     - "新增 now 时间锚点（2026-10-23T12:00:00Z）——7 天窗口/72h 冷却判定全部以它为基准，否则不可复现"
     - "B03 重算：last_touch_at 改 2026-10-20T12:01Z，距 now 恰 71h59min → DENY（真正贴住边界）"
