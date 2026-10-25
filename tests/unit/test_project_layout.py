@@ -19,7 +19,7 @@ REQUIRED_DIRS = (
     "src/nodes",
     "src/skills",
     "src/workflows",
-    "src/policy",
+    "src/policy_kernel",
     "src/decision",
     "src/audit",
     "src/models",
