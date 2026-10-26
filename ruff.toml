@@ -1,0 +1,81 @@
+# GovernCRM ruff 配置
+#
+# 说明：本文件是 ruff 的唯一配置源（pyproject.toml 中不再放 [tool.ruff] 段，
+#       避免两处配置漂移）。
+#
+# 依赖白名单制（红线⑤：业务层零供应商依赖）：
+#   1) 本文件 [lint.flake8-tidy-imports.banned-api] 禁止供应商 SDK 直接 import；
+#   2) `litellm` 仅允许出现在 src/providers/ 适配层（per-file-ignores 豁免 + 扫描脚本双重约束）；
+#   3) 白名单之外的一切第三方库由 `scripts/check_dependencies.py` 全量扫描阻断
+#      （`make lint` 调用，`make scan-deps` 可单独执行）。
+
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# `docs/` 下的规格文档是**权威源**，不由工具改写（ruff 会格式化 Markdown 里的 Python 代码块，
+# 导致 format-check 篡改 specs 文档）。文档内的示例代码由人工维护。
+extend-exclude = ["docs"]
+
+[lint]
+select = [
+    "E",    # pycodestyle 错误
+    "F",    # pyflakes
+    "I",    # isort 导入排序
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # flake8-simplify
+    "C4",   # flake8-comprehensions
+    "PIE",  # flake8-pie
+    "PT",   # flake8-pytest-style
+    "ARG",  # flake8-unused-arguments
+    "RUF",  # ruff 专属规则
+    "TID",  # flake8-tidy-imports（banned-api）
+]
+ignore = [
+    "E501",    # 行长交给 formatter
+    "B008",    # FastAPI 的 Depends()/Query() 等惯用写法
+    "RUF001",  # 全角标点歧义（中文注释场景）
+    "RUF002",  # 同上
+    "RUF003",  # 同上
+]
+
+[lint.per-file-ignores]
+# src/providers/ 是唯一被授权接触供应商 SDK 的适配层（N4 拍板 B）。
+# 此处豁免 TID251；其它供应商 SDK 仍由 scripts/check_dependencies.py 全量白名单扫描阻断。
+"src/providers/**" = ["TID251"]
+# 测试允许未使用的参数与魔法数字
+"tests/**" = ["ARG", "PT011"]
+
+[lint.flake8-tidy-imports]
+# 注意：不设置 ban-relative-imports —— 业务层按 `.trellis/spec/backend/directory-structure.md`
+# 约定用 `from ....providers import ModelProvider` 这类父级相对导入访问协议入口。
+
+# 供应商 SDK 黑名单：业务层（nodes/ skills/ workflows/ policy/ decision/ api/ ...）
+# 一律不得直接依赖，只能通过 src/providers 适配层的协议入口调用。
+[lint.flake8-tidy-imports.banned-api]
+"litellm" = { msg = "litellm 只能在 src/providers/ 适配层内 import（N4 拍板 B）；业务层只认 ModelProvider / JudgmentProvider 协议" }
+"openai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"anthropic" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"google.genai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"google.generativeai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"cohere" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"ollama" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"dashscope" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"zhipuai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"mistralai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"groq" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"vertexai" = { msg = "禁止直接依赖供应商 SDK，请走 src/providers 适配层（红线⑤）" }
+"transformers" = { msg = "未列入依赖白名单的第三方库禁止 import" }
+
+[lint.isort]
+known-first-party = ["src"]
+combine-as-imports = true
+
+[lint.pydocstyle]
+convention = "google"
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true

@@ -1,0 +1,157 @@
+# GovernCRM CI —— 契约门禁（硬阻断，不得设「允许失败」）
+#
+# 设计说明
+# --------
+# 1) 四个并行 job = 快速反馈层，各跑 `make` 的一个子目标，与本地配方**完全同一份**。
+# 2) `make-check` job 是**权威阻断门禁**：串行再跑一次完整 `make check`，
+#    确保「本地一条命令 = CI 一条命令」在流水线上是可验证的事实，而非口号。
+#    两层并存是有意为之——并行层给开发者快速定位，聚合层给合并以单一硬门槛。
+# 3) 六项门禁（MVP_任务拆解.md:90-98）：
+#      ① pytest  ② ruff lint  ③ format-check  ④ mypy
+#      ⑤ 真 PostgreSQL 集成测试（C13，append-only/哈希链/分区表/CHECK 不得用 SQLite/内存替代）
+#      ⑥ 零供应商依赖扫描（红线⑤：import litellm 仅 src/providers/）
+# 4) 后续扩到七项契约门禁（FR-39，v5.3 §F.4）：OpenAPI 快照、契约测试套件、错误码完备性、
+#    写端点必写审计、external_send 必过闸门、必经节点不可 opt-in 的静态扫描。
+#    由 T-F1 / T-F2 落地，本文件预留 job 位。
+# 5) C15「认证旁路开关在生产环境必须拒绝启动」属运行期约束，落在认证/启动阶段（T-B/T-F），
+#    CI 侧待该代码就位后补一条负向用例。
+
+name: ci
+
+on:
+  push:
+    branches: [main, "feature/**", "release/**"]
+  pull_request:
+    branches: [main]
+
+# 并发控制：同分支新提交取消在跑的旧流水线，节省配额
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_PYTHON: "3.13"
+  # 与 docker-compose.yml / 本地 .env.example 保持一致；CI 用 service container，故指向 localhost
+  DATABASE_URL: postgresql+psycopg://governcrm:governcrm_ci_only@localhost:5432/governcrm
+  POSTGRES_USER: governcrm
+  POSTGRES_PASSWORD: governcrm_ci_only
+  POSTGRES_DB: governcrm
+
+jobs:
+  lint:
+    name: "lint（ruff + 依赖白名单扫描）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync
+      - name: make lint
+        run: make lint
+      - name: make format-check
+        run: make format-check
+
+  typecheck:
+    name: "typecheck（mypy）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync
+      - name: make typecheck
+        run: make typecheck
+
+  test:
+    name: "test（单元，排除 pg 标记）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync
+      - name: make test
+        run: make test
+
+  pg-integration:
+    name: "pg-integration（真 PostgreSQL 16 + pgvector）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync
+      - name: enable pgvector extension
+        run: |
+          docker exec "${{ job.services.postgres.id }}" \
+            psql -U "${{ env.POSTGRES_USER }}" -d "${{ env.POSTGRES_DB }}" \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: apply migrations
+        run: make migrate
+      - name: make pg-test
+        run: make pg-test
+      - name: 哈希链全链校验（红线③）
+        run: make verify-chain
+
+  # 权威阻断门禁：六项聚合。未过即阻断合并，不得设 continue-on-error / allow-failure。
+  make-check:
+    name: "make check（六项聚合 · 硬阻断）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, typecheck, test, pg-integration]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ${{ env.POSTGRES_USER }} -d ${{ env.POSTGRES_DB }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync
+      - name: enable pgvector extension
+        run: |
+          docker exec "${{ job.services.postgres.id }}" \
+            psql -U "${{ env.POSTGRES_USER }}" -d "${{ env.POSTGRES_DB }}" \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: apply migrations
+        run: make migrate
+      - name: make check
+        run: make check
