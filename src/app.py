@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from src.api.routes.tasks import router as tasks_router
 from src.policy_kernel.config import GovernanceConfig, load_and_validate
 
 #: 配置文件路径。生产用环境变量 `GOVERNANCE_CONFIG_PATH` 覆盖（导入时读一次）；
@@ -40,3 +41,4 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(tasks_router)

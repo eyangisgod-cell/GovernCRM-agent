@@ -38,7 +38,8 @@ from typing import Any, Protocol
 
 from psycopg.types.json import Jsonb
 
-from src.audit.hash_chain import GENESIS_HASH, insert_statement_sql
+from src.audit.chain import chain_tip
+from src.audit.hash_chain import insert_statement_sql
 from src.providers.protocols import (
     ALLOW_LIKE_CHOICES,
     CONFIDENCE_HIGH,
@@ -151,16 +152,7 @@ def _digest_int(*parts: object) -> int:
 
 def _last_record_hash(connection: ConnectionLike, tenant_id: str) -> str:
     """取该租户链上最后一条记录的哈希（无记录时为创世值）。"""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "select record_hash from audit_log where tenant_id = %s::uuid "
-            "order by record_seq desc limit 1",
-            (tenant_id,),
-        )
-        row = cursor.fetchone()
-    if row is None:
-        return GENESIS_HASH
-    return str(row[0])
+    return chain_tip(connection, tenant_id)
 
 
 def pg_audit_writer(connection: ConnectionLike) -> AuditWriter:

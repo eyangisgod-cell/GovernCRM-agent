@@ -8,8 +8,10 @@
 写入方与校验方共用本模块的同一段 SQL 表达式——这是「字段规范化不一致 → 校验永远失败」
 的唯一解法：口径只有一份，且由数据库统一渲染。
 
-本模块只产出 SQL 片段与纯函数，**不 import psycopg、不连库**；取数与执行在
-`scripts/verify_hash_chain.py` 与调用方。
+本模块只产出 SQL 片段与纯函数，**模块级不 import psycopg、不连库**；取数与执行在
+`scripts/verify_hash_chain.py`、调用方，以及本模块的运维入口
+`python -m src.audit.hash_chain --verify`（psycopg 仅在 `main()` 内惰性 import，
+`record_hash` 一律由数据库算——红线③）。
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ __all__ = [
     "canonical_sql",
     "expected_hash_sql",
     "insert_statement_sql",
+    "main",
     "verify_chain",
     "verify_query_sql",
 ]
@@ -251,3 +254,85 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> ChainVerification:
         prev_by_tenant[tenant] = (record_seq, audit_id, record_hash)
 
     return ChainVerification(total=len(ordered), breaks=tuple(breaks))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口：`python -m src.audit.hash_chain --verify`。
+
+    只接线现有的 `verify_query_sql` + `verify_chain`，不重写哈希逻辑；
+    `record_hash` 由数据库算（红线③），本函数不自算哈希写库。
+
+    退出码：0 = 链完整；1 = 链断裂（stderr 输出定位到第 N 条：tenant_id +
+    record_seq + audit_id + 原因）；2 = 环境问题（缺 `DATABASE_URL` / 非法参数）。
+    """
+    import argparse
+    import os
+    import sys
+    import uuid as uuid_module
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.audit.hash_chain",
+        description="audit_log 哈希链全链校验（红线③的运维/验收入口）",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="全链校验（默认行为；显式声明供 make verify-chain / 门禁调用）",
+    )
+    parser.add_argument("--tenant-id", default=None, help="只校验指定租户（默认全部）")
+    args = parser.parse_args(argv)
+
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print(
+            "未设置 DATABASE_URL，无法校验哈希链。\n"
+            "  请先 `cp .env.example .env` 并 `docker compose up -d`，"
+            "或经 `make verify-chain` 同源的 .env。",
+            file=sys.stderr,
+        )
+        return 2
+    url = url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+    tenant_id = args.tenant_id
+    if tenant_id is not None:
+        try:
+            uuid_module.UUID(tenant_id)
+        except ValueError as exc:
+            print(f"--tenant-id 不是合法 UUID：{tenant_id}（{exc}）", file=sys.stderr)
+            return 2
+        # verify_query_sql 的租户过滤是裸插值，由调用方负责加引号（与测试口径一致）
+        query = verify_query_sql(f"'{tenant_id}'")
+    else:
+        query = verify_query_sql()
+
+    import psycopg
+
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.execute(query)
+        description = cur.description
+        assert description is not None
+        columns = [desc.name for desc in description]
+        rows = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+    result = verify_chain(rows)
+    if result.ok:
+        print(f"[hash-chain] 校验通过：{result.total} 条记录，链完整。")
+        return 0
+
+    print(
+        f"[hash-chain] 校验失败：{result.total} 条记录，发现 {len(result.breaks)} 处断裂。",
+        file=sys.stderr,
+    )
+    for item in result.breaks:
+        print(f"  - {item.describe()}", file=sys.stderr)
+    first = result.first_break
+    if first is not None:
+        print(
+            f"\n首处断裂定位：租户 {first.tenant_id} 的第 {first.index} 条记录。",
+            file=sys.stderr,
+        )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

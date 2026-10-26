@@ -77,5 +77,5 @@ convention = "google"
 [format]
 quote-style = "double"
 indent-style = "space"
-line-ending = "lf"
+line-ending = "auto"
 docstring-code-format = true
