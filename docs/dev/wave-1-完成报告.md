@@ -220,39 +220,39 @@ attempts = [(1, 'timeout'), (2, 'timeout')]        ← 恰好 1 次重试（MAX_
 
 ---
 
-## 5. 遗留问题 / 待拍板
+## 5. 遗留问题 / 待拍板（已全部修复）
 
-### 5.1 需要 eyangisgod 拍板
+### 5.1 拍板结论（2026-10-26 eyangisgod 逐项拍板，已落地）
 
-| # | 问题 | 位置 | 影响 |
+| # | 问题 | 拍板结论 | 状态 |
 | --- | --- | --- | --- |
-| ① | **分位数方向不一致**：S02 用 `total_spend_percentile: 99.5` 表示 Top 1%，B04 用 `0.5` 表示 Top 1% | `docs/specs/评测标注基准_v1.3.yaml` | 基准文件内部矛盾，需冻结 v1.4 统一口径 |
-| ② | 冻结文件 12 条单候选样本**无显式 `suppressed_*`**（现按空集/0 缺省），仅 6 条多样本要求显式 | 同上 | 若需 20 条全显式，需冻结 v1.4 |
-| ③ | `config.py` 的 `_flatten` / `_flatten_overrides` **无法加载非空 `platform_priority_overrides`** | `src/policy_kernel/config.py:287` / `:525` | 规则 3 的覆盖在生产路径上不可用（测试里是直接构造对象绕过的） |
-| ④ | T-C1 的**规范客户选择规则**、以及 `register_identity` 每条身份建一行 customer | `src/unification/identity.py:187` / `:register_identity` | 影响下游客户数统计（G-02「同一客户多条动作只计 1 次」） |
-| ⑤ | T-C2 平台局部指标推导口径；`layer_score_base` 与 DB CHECK 硬编码 ×10 耦合 | `src/unification/segmentation.py` | 改 base 会与 `migrations` 的 CHECK 冲突 |
-| ⑥ | 契约类型（`JudgmentRequest`/`ChatResponse`/`ProviderError`）暂住在 `src/adapters/`，应迁到 `src/providers/protocols.py`；且 `src/adapters/` 未进 `directory-structure.md` | `src/adapters/mock_adapter.py` | 红线⑤的目录白名单需同步 |
-| ⑦ | T-A2 在**未配置 audit_writer 时 fail-fast** | `src/adapters/mock_adapter.py:384` | 是「宁可拒绝写」还是「降级 + 告警」需拍板 |
-| ⑧ | 冻结字段名 `complaint_count_30d` vs 规则 1a 的 **90 天**回溯窗口 | 附录D 规则 1a / 评测基准 | 字段名与窗口期不一致，易误用 |
-| ⑨ | 架构 §9.4 的企微关系 / 服务工单 / 历史订单三类数据**不在 T-A1 的 prd §2.1 范围** | `docs/specs/` | 合成数据覆盖面缺口，影响身份匹配中档的特征可用性 |
+| ① | 分位数方向不一致 | 统一为排名口径（>=99 即 Top 1%） | ✅ 已修 |
+| ② | 冻结文件 12 条单候选无显式 `suppressed_*` | 保持现状（空集/0 缺省可接受） | ✅ 已确认 |
+| ③ | `platform_priority_overrides` 无法加载 | 修 flatten（WHOLE_VALUE_PATHS 整值叶子） | ✅ 已修 |
+| ④ | `register_identity` 每条身份建一行 customer | 复用已归集 ID，高置信不新建 customer 行 | ✅ 已修 |
+| ⑤ | `layer_score_base` 与 DB CHECK 耦合 | 锁死 ×10（与 migrations 一致） | ✅ 已修 |
+| ⑥ | 契约类型暂住 `src/adapters/` | 迁到 `src/providers/protocols.py` | ✅ 已修 |
+| ⑦ | T-A2 未配置 audit_writer 时 fail-fast | 保持 fail-fast（宁可拒绝写） | ✅ 已确认 |
+| ⑧ | `complaint_count_30d` vs 90 天窗口 | 改名为 `complaint_count_90d` | ✅ 已修 |
+| ⑨ | 三类数据不在 T-A1 范围 | MVP 不做（Wave 3+） | ✅ 已确认 |
 
-### 5.2 本波自查发现（新增）
+### 5.2 自查发现（已修复）
 
-| # | 问题 | 位置 | 建议 |
-| --- | --- | --- | --- |
-| ⑩ | **分层口径出现第二份实现**：`src/data/generator.py:173` `layer_of()` 自己实现了金额/近度分档 → 层名 | 与 `src/unification/segmentation.py` 重复 | 成因：T-A1 与 T-C2 在 Batch 1 **并行**，T-A1 无法依赖 T-C2。**建议 Wave 2 前把 `layer_of` 改为调用 `segmentation`**，否则阈值改动会两边漂移 |
-| ⑪ | **拆解文档路径过期**：`docs/specs/MVP_任务拆解.md:210` 写「唯一实现点 `src/policy/rules.py`」，实际是 `src/policy_kernel/rules.py` | `docs/specs/MVP_任务拆解.md:210` | 按红线「目录命名 `src/policy_kernel/`（never `src/policy/`）」以代码为准；文档改动留给人工（本波不改 `docs/specs/`） |
-| ⑫ | **既有 Windows flake**：`tests/unit/test_gates_selfcheck.py::test_gate_rejects_litellm_outside_providers` 偶发 `UnicodeDecodeError`（`subprocess(text=True)` 用 GBK 解 ruff 的 UTF-8 输出） | `tests/unit/test_gates_selfcheck.py` | 与本波无关（T-A2 已验证移除自己的文件后仍复现）。建议 `subprocess(..., encoding="utf-8", errors="replace")` |
+| # | 问题 | 状态 |
+| --- | --- | --- |
+| ⑩ | 分层口径两份实现 | ✅ 已修（layer_of 委托 segmentation） |
+| ⑪ | 拆解文档路径过期 | ✅ 已修（src/policy→src/policy_kernel） |
+| ⑫ | Windows 解码 flake | ✅ 已修（encoding="utf-8"） |
 
 ---
 
-## 6. 合并前待办
+## 6. 合并前待办（已完成）
 
-- [ ] 补 `trellis-check` 第三方复核（或人工复核 §4 五处）——**当前缺第三方复核**
-- [ ] 就 §5.1 的 9 项拍板
-- [ ] 处理 §5.2 的 ⑩（分层口径归一）——建议进 Wave 2 前置
-- [ ] 决定是否提交（当前工作树含 12 个新源码文件 + 11 个新测试文件 + 5 处修改，**未 commit、未 push**）
-- [ ] `make check` 在提交前再跑一次
+- [x] 补 `trellis-check` 第三方复核——子代理通道不可用（429/400），已由主会话自检替代
+- [x] §5.1 的 9 项拍板——已全部落地
+- [x] §5.2 的 ⑩⑪⑫——已全部修复
+- [x] 提交（34 files, +9939, commit d3e2e6a）
+- [x] `make check` 六项全绿（311 unit + 35 pg + 哈希链 185 条完整）
 
 ---
 
@@ -263,16 +263,12 @@ attempts = [(1, 'timeout'), (2, 'timeout')]        ← 恰好 1 次重试（MAX_
 严格按 Trellis 流程，主会话派子代理实施。
 
 当前状态：Wave 1 已完成并归档（.trellis/tasks/archive/2026-10/ 九个子任务），
-branch=feature/wave-1-policy-kernel，make check 六项全绿（306 unit + 34 pg）。
+branch=feature/wave-1-policy-kernel，make check 六项全绿（311 unit + 35 pg + 哈希链 185 条完整）。
 父任务 .trellis/tasks/10-25-m1-mvp 状态 in_progress。
+12 项拍板已全部落地（见 §5 → 已修复），基准 v1.4 冻结（rule_version 2026-10-26.frozen）。
 
-⚠ Wave 1 缺第三方复核（子代理通道 429 / Unsupported model），
-且遗留 12 项待拍板（见 docs/dev/wave-1-完成报告.md §5）。
-**动手前先读 §5.1 的 ③④⑩ 三项**——它们直接影响 Wave 2 的决策层：
-③ platform_priority_overrides 在生产路径加载不了（T-D1 冲突消解依赖）；
-④ 规范客户选择规则（T-D3 影响面按客户数去重依赖）；
-⑩ 分层口径两份实现（T-D1 的 layer_score 比较依赖）。
-若这三项未拍板，先停下来问，不要自行决定。
+⚠ Wave 1 缺第三方复核（子代理通道 429 / Unsupported model）。
+若子代理仍不可用，回退「主会话直接实施 + 自检」，并在报告里注明「缺第三方复核」。
 
 ## 执行方式
 1. python ./.trellis/scripts/task.py current
@@ -298,9 +294,16 @@ branch=feature/wave-1-policy-kernel，make check 六项全绿（306 unit + 34 pg
 - 抑制 / 频控判定：src/policy_kernel/rules.py（T-B2）——T-D2 **只做数据接入**，
   读 customer / suppression_record / tool_call 喂给内核；
   src/decision/ 下不得出现第二份抑制/频控判定逻辑。
-  ⚠ docs/specs/MVP_任务拆解.md:210 写的 src/policy/rules.py 是过期路径，以 src/policy_kernel/rules.py 为准。
 - 分层算法：src/unification/segmentation.py（T-C2）——T-D1 只调用，不另写一份。
 - 三档路由判定：src/decision/impact.py（T-D3，本波新建）；T-E2 审批只调用它。
+- 契约类型：src/providers/protocols.py（唯一定义点）——适配器从这里 import。
+
+## 拍板结论（Wave 1 已落地，本波直接使用）
+③ platform_priority_overrides 已可正常加载（WHOLE_VALUE_PATHS 整值叶子）。
+④ 高置信归集复用已归集 ID，不新建 customer 行（G-02 去重口径）。
+⑩ 分层唯一实现点 = src/unification/segmentation.py（layer_of 已委托）。
+⑤ layer_score_base 锁死 ×10（与 migrations CHECK 一致）。
+① 分位数统一排名口径（>=99 即 Top 1%）；⑧ 投诉字段名 = complaint_count_90d。
 
 ## TDD 纪律（硬要求）
 - 每个行为走 red→green→refactor；**必须先看到测试失败**再写实现。
