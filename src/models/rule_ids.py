@@ -4,9 +4,9 @@
 本模块是该表的**静态镜像**，用途是给数据库 CHECK 约束提供字面量，
 从结构上杜绝「自造 rule_id」。
 
-> 策略内核的 ``RuleId`` 枚举由 **T-B2** 在 ``src/policy/kernel.py`` 定义（纯函数、零依赖，
-> 不得 import 本模块——本包会连带引入 SQLAlchemy）。两侧同源于冻结版文档，
-> 由契约测试（Wave 4 / T-F2）逐条比对，出现漂移即阻断合并。
+> 策略内核的 ``RuleId`` 枚举由 **T-B1** 在 ``src/policy_kernel/kernel.py`` 定义（纯函数、
+> 零依赖，不得 import 本模块——本包会连带引入 SQLAlchemy）。两侧同源于冻结版文档，
+> 由契约测试（``tests/policy/test_kernel_contracts.py``）逐条比对，出现漂移即阻断合并。
 """
 
 from __future__ import annotations
