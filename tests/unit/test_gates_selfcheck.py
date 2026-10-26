@@ -36,6 +36,8 @@ def run_scanner() -> subprocess.CompletedProcess[str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )
@@ -47,6 +49,8 @@ def run_ruff_check(path: Path) -> subprocess.CompletedProcess[str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )

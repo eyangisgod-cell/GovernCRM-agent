@@ -207,7 +207,7 @@
 |---|-----|
 | 依赖 | T-B2 |
 | 产出文件 | `src/decision/suppression.py`, `src/decision/rate_limit.py` |
-| **注意** | **不在此重复实现规则**——抑制/频控的判定逻辑唯一实现在 `src/policy/rules.py`（T-B2）；本任务只做**数据接入**（读 `customer`/`suppression_record`/`tool_call` 并喂给内核）。**唯一实现点**：`src/policy/rules.py`，`src/decision/` 下不得出现第二份抑制/频控判定逻辑 |
+| **注意** | **不在此重复实现规则**——抑制/频控的判定逻辑唯一实现在 `src/policy_kernel/rules.py`（T-B2）；本任务只做**数据接入**（读 `customer`/`suppression_record`/`tool_call` 并喂给内核）。**唯一实现点**：`src/policy_kernel/rules.py`，`src/decision/` 下不得出现第二份抑制/频控判定逻辑 |
 | 验收 | ① 投诉客户 → DENY ② 频控第 3 次 → DENY ③ 同通道 <72h → DENY |
 
 #### T-D3 影响面计算

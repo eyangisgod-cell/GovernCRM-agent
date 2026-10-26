@@ -1,0 +1,128 @@
+# ============================================================================
+# path_assertions.yaml —— 路径完整性断言评测样本（T-G1 夹具）
+#
+# 依据：
+#   - 架构 v5.2 §4.3 治理闸门：⓪ 路径完整性断言**先于一切规则**，
+#     missing = REQUIRED_NODES - set(ctx.visited_nodes) → DENY + rule_id=PATH_ASSERT
+#   - 架构 v5.2 §4.4-9 / §4.4-10：路径断言与「计划确认必经节点」是两道防失控机制
+#   - 架构 v5.2 ADR-035 / 裁决 #7：confirm_plan 是图内必经人工节点，纳入 REQUIRED_NODES
+#   - 《MVP_任务拆解.md》§三【F】T-G1：路径断言 5 条，**独立验收，不计入一致率分母**
+#
+# 纪律：
+#   1. **独立验收**：本文件的样本不进入策略一致率分母（20 条策略样本）——
+#      路径完整性断言属红线④（必经节点缺失即 DENY，不可 opt-in），
+#      与策略判定是不同性质的断言，两套门禁不得混算。
+#   2. **不可 opt-in**：守卫用例直接断言 `conclusion=DENY` 且 `hit_rule_ids` 含
+#      `PATH_ASSERT`；不得因为「实现还没上线」而 skip（路径断言实现属 T-E4 / Wave 3）。
+#   3. 每条样本跳过一个**真实**的必经节点；PA01–PA04 各跳一个**不同**节点，
+#      合计覆盖全部必经节点；PA05 覆盖「多节点同时缺失」场景，
+#      报错信息须点名**全部**缺失节点。
+#   4. visited_nodes 与 skipped_nodes 必须自洽：
+#      set(visited_nodes) == set(required_nodes) - set(skipped_nodes)。
+#   5. rule_id 取自《附录D §4 规则 ID 登记表》（唯一权威）：PATH_ASSERT。
+#
+# 本文件只固化样本，不实现路径断言逻辑（实现属 T-E4，Wave 3）。
+# ============================================================================
+
+required_nodes:
+  - confirm_plan
+  - validate
+  - compliance
+  - guard
+
+samples:
+  - id: PA01
+    description: "跳过 confirm_plan（计划确认必经人工节点，ADR-035 / 裁决 #7）→ DENY"
+    skipped_nodes:
+      - confirm_plan
+    visited_nodes:
+      - validate
+      - compliance
+      - guard
+    expected:
+      conclusion: DENY
+      hit_rule_ids:
+        - PATH_ASSERT
+      missing_nodes:
+        - confirm_plan
+      error_code: E14
+      note: "confirm_plan 是影响面知情同意入口与防注入第一道人工闸门；未经确认的计划不得进入执行"
+
+  - id: PA02
+    description: "跳过 validate（计划校验节点）→ DENY"
+    skipped_nodes:
+      - validate
+    visited_nodes:
+      - confirm_plan
+      - compliance
+      - guard
+    expected:
+      conclusion: DENY
+      hit_rule_ids:
+        - PATH_ASSERT
+      missing_nodes:
+        - validate
+      error_code: E14
+      note: "validate 承载策略内核的计划校验，跳过即治理链被绕过"
+
+  - id: PA03
+    description: "跳过 compliance（合规校验节点）→ DENY"
+    skipped_nodes:
+      - compliance
+    visited_nodes:
+      - confirm_plan
+      - validate
+      - guard
+    expected:
+      conclusion: DENY
+      hit_rule_ids:
+        - PATH_ASSERT
+      missing_nodes:
+        - compliance
+      error_code: E14
+      note: "合规校验是发送前的内容门禁，缺失即不可放行"
+
+  - id: PA04
+    description: "跳过 guard（治理闸门节点）→ DENY"
+    skipped_nodes:
+      - guard
+    visited_nodes:
+      - confirm_plan
+      - validate
+      - compliance
+    expected:
+      conclusion: DENY
+      hit_rule_ids:
+        - PATH_ASSERT
+      missing_nodes:
+        - guard
+      error_code: E14
+      note: "guard 是唯一决策出口；断言先于一切规则，缺失即 DENY"
+
+  - id: PA05
+    description: "同时缺 confirm_plan + guard（多节点缺失）→ DENY，报错信息含全部缺失节点"
+    skipped_nodes:
+      - confirm_plan
+      - guard
+    visited_nodes:
+      - validate
+      - compliance
+    expected:
+      conclusion: DENY
+      hit_rule_ids:
+        - PATH_ASSERT
+      missing_nodes:
+        - confirm_plan
+        - guard
+      error_code: E14
+      note: "多节点缺失时报错须点名全部缺失节点，不得只报第一个"
+
+meta:
+  version: "1.0"
+  total_samples: 5
+  frozen_at: "2026-10-26"
+  rule_version: "2026-10-24.frozen"
+  rule_source: "docs/specs/GovernCRM_技术架构方案_v5.2.md §4.3 / §4.4-9 / §4.4-10"
+  task: "MVP_任务拆解.md §三【F】T-G1（路径断言 5 条）"
+  scope: "独立验收，不计入策略一致率分母（20 条策略样本）"
+  implementation_owner: "T-E4（Wave 3）：src/graph/path_assert.py"

@@ -311,6 +311,66 @@ def test_redline_rule_ids_are_frozen() -> None:
     }
 
 
+# ---------------------------------------------------------------------------
+# 拍板③⑤（2026-10-26）：整值叶子 + 分层乘数锁死
+# ---------------------------------------------------------------------------
+
+
+def test_nonempty_platform_priority_overrides_loads(
+    tmp_path: Path, valid_raw: dict[str, Any]
+) -> None:
+    """拍板③：非空 `platform_priority_overrides` 必须能被 `load_and_validate` 装进来。
+
+    成因：`_flatten` 把非空映射递归摊平成逐条叶子 →
+    `conflict_resolution.platform_priority_overrides.<平台>` 脱离 SCHEMA 登记 →
+    被当成未知字段拒绝，规则 3 的平台优先级覆盖在生产路径上永远装不进来。
+    """
+    valid_raw["conflict_resolution"]["platform_priority_overrides"] = {
+        "taobao": 10,
+        "wechat_moments": 20,
+    }
+    config = load_and_validate(_write(tmp_path, valid_raw))
+    assert config.conflict_resolution.platform_priority_overrides == {
+        "taobao": 10,
+        "wechat_moments": 20,
+    }
+
+
+def test_nonempty_platform_priority_overrides_override_is_allowlisted() -> None:
+    """拍板③续：覆盖非空 `platform_priority_overrides` 必须落在白名单内，不得误拒。"""
+    base = {"conflict_resolution": {"platform_priority_overrides": {"taobao": 10}}}
+    merged = apply_overrides(
+        base,
+        _nest({"conflict_resolution.platform_priority_overrides": {"taobao": 5, "douyin": 1}}),
+    )
+    assert merged["conflict_resolution"]["platform_priority_overrides"] == {
+        "taobao": 5,
+        "douyin": 1,
+    }
+
+
+def test_layer_score_base_is_locked_to_ten(tmp_path: Path, valid_raw: dict[str, Any]) -> None:
+    """拍板⑤：分层乘数锁死 10。
+
+    附录D 规则 3 规定 `layer_score = amount_score × 10 + recency_score`，
+    且数据库 CHECK `chk_customer_segment_layer_score` 硬编码 ×10
+    （migrations/001_core_tables.sql:225）。配成别的值会在写库时被拒——
+    必须在启动前拦住，不要等写库才炸。
+    """
+    valid_raw["segmentation"]["layer_score_base"] = 20
+    with pytest.raises(ConfigError) as excinfo:
+        load_and_validate(_write(tmp_path, valid_raw))
+    message = str(excinfo.value)
+    assert "segmentation.layer_score_base" in message
+    assert "10" in message, f"错误信息必须给出唯一可选值 10，实际是：{message}"
+
+
+def test_layer_score_base_ten_is_accepted(tmp_path: Path, valid_raw: dict[str, Any]) -> None:
+    """拍板⑤续：出厂值 10 必须照常通过。"""
+    valid_raw["segmentation"]["layer_score_base"] = 10
+    assert load_and_validate(_write(tmp_path, valid_raw)).segmentation.layer_score_base == 10
+
+
 def _nest(flat: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for path, value in flat.items():

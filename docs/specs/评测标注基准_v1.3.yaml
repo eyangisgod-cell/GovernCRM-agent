@@ -1,6 +1,6 @@
 # GovernCRM 策略评测标注基准 v1.3
 # 冻结日期: 2026-10-25（v1.2 于 2026-10-24 冻结；v1.3 = 5 条边界样本逐条拍板后的定稿）
-# rule_version: "2026-10-24.frozen"
+# rule_version: "2026-10-26.frozen"
 # 标注纪律: 本文件先于 policy_kernel 入库。CI 用本文件对照内核输出，一致率须 100%。
 # 生产方式: AI 起草 (按 GovernCRM_附录D_冻结版.md) → eyangisgod 逐条拍板（2026-10-25）
 # 5 条边界样本(*) 期望值已由 eyangisgod 逐条确认（2026-10-25）
@@ -54,7 +54,7 @@ benchmarks:
       avg_order_value_90d: 120
       last_purchase_days_ago: 45
       total_spend_percentile: 50
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -79,7 +79,7 @@ benchmarks:
       avg_order_value_90d: 500
       last_purchase_days_ago: 20
       total_spend_percentile: 99.5
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -104,7 +104,7 @@ benchmarks:
       avg_order_value_90d: 80
       last_purchase_days_ago: 60
       total_spend_percentile: 40
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.03
       explicit_refusal: true
       has_marketing_consent: true      # 有授权，但明示拒绝仍 DENY
@@ -129,7 +129,7 @@ benchmarks:
       avg_order_value_90d: 60
       last_purchase_days_ago: 30
       total_spend_percentile: 30
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.03
       explicit_refusal: false
       has_marketing_consent: false
@@ -154,7 +154,7 @@ benchmarks:
       avg_order_value_90d: 60
       last_purchase_days_ago: 30
       total_spend_percentile: 30
-      complaint_count_30d: 2
+      complaint_count_90d: 2
       refund_rate: 0.05
       explicit_refusal: false
       has_marketing_consent: true
@@ -179,7 +179,7 @@ benchmarks:
       avg_order_value_90d: 90
       last_purchase_days_ago: 15
       total_spend_percentile: 55
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.35
       explicit_refusal: false
       has_marketing_consent: true
@@ -204,7 +204,7 @@ benchmarks:
       avg_order_value_90d: 100
       last_purchase_days_ago: 40
       total_spend_percentile: 45
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -229,7 +229,7 @@ benchmarks:
       avg_order_value_90d: 100
       last_purchase_days_ago: 25
       total_spend_percentile: 50
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -254,7 +254,7 @@ benchmarks:
       avg_order_value_90d: 150
       last_purchase_days_ago: 25
       total_spend_percentile: 60
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -288,7 +288,7 @@ benchmarks:
       avg_order_value_90d: 200
       last_purchase_days_ago: 20
       total_spend_percentile: 70
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -322,7 +322,7 @@ benchmarks:
       avg_order_value_90d: 200
       last_purchase_days_ago: 20
       total_spend_percentile: 70
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -356,7 +356,7 @@ benchmarks:
       avg_order_value_90d: 50
       last_purchase_days_ago: 30
       total_spend_percentile: 25
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -390,7 +390,7 @@ benchmarks:
       avg_order_value_90d: 300
       last_purchase_days_ago: 10
       total_spend_percentile: 85
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -416,7 +416,7 @@ benchmarks:
       avg_order_value_90d: 300
       last_purchase_days_ago: 10
       total_spend_percentile: 85
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -442,7 +442,7 @@ benchmarks:
       avg_order_value_90d: 80
       last_purchase_days_ago: 60
       total_spend_percentile: 40
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.03
       explicit_refusal: true
       has_marketing_consent: false
@@ -470,7 +470,7 @@ benchmarks:
       avg_order_value_90d: 200
       last_purchase_days_ago: 20
       total_spend_percentile: 65
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -505,7 +505,7 @@ benchmarks:
       avg_order_value_90d: 150
       last_purchase_days_ago: 20
       total_spend_percentile: 60
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -530,7 +530,7 @@ benchmarks:
       avg_order_value_90d: 120
       last_purchase_days_ago: 25
       total_spend_percentile: 55
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.02
       explicit_refusal: false
       has_marketing_consent: true
@@ -554,8 +554,8 @@ benchmarks:
     customer:
       avg_order_value_90d: 40
       last_purchase_days_ago: 150
-      total_spend_percentile: 0.5             # Top 1% 内，与 SUP_HIGH_VALUE 口径自洽
-      complaint_count_30d: 0
+      total_spend_percentile: 99.5            # 排名口径 Top 1%（>=99），与 SUP_HIGH_VALUE 自洽
+      complaint_count_90d: 0
       refund_rate: 0.03
       explicit_refusal: false
       has_marketing_consent: true
@@ -575,7 +575,7 @@ benchmarks:
     expected:
       conclusion: DENY
       hit_rule_ids: ["SUP_HIGH_VALUE"]
-      note: "规则4分维度：抑制取更严一档 → 全局层 DENY 胜出。已拍板（2026-10-25）：期望值确认；total_spend_percentile 改为 0.5（Top 1% 内），使显式 global_suppression 与字段推导两条路径口径自洽（层级分歧的抑制侧，与 S13/S14 的权益侧互为对照）"
+      note: "规则4分维度：抑制取更严一档 → 全局层 DENY 胜出。已拍板（2026-10-25）：期望值确认；total_spend_percentile 统一为排名口径 99.5（>=99 即 Top 1%），使显式 global_suppression 与字段推导两条路径口径自洽（层级分歧的抑制侧，与 S13/S14 的权益侧互为对照）"
 
   - id: B05  # (*)
     description: "*边界: 平台优先级覆盖 (platform_priority_overrides) 生效"
@@ -583,7 +583,7 @@ benchmarks:
       avg_order_value_90d: 200
       last_purchase_days_ago: 20
       total_spend_percentile: 65
-      complaint_count_30d: 0
+      complaint_count_90d: 0
       refund_rate: 0.01
       explicit_refusal: false
       has_marketing_consent: true
@@ -617,12 +617,12 @@ benchmarks:
 
 # ═══════════ 元信息 ═══════════
 meta:
-  version: "1.3"
+  version: "1.4"
   total_samples: 20
   simple_samples: 15
   boundary_samples: 5
   frozen_at: "2026-10-25"
-  rule_version: "2026-10-24.frozen"
+  rule_version: "2026-10-26.frozen"
   rule_source: "docs/specs/GovernCRM_附录D_冻结版.md"
   review_status: "已由 eyangisgod 逐条拍板（2026-10-25）"
   boundary_review_note: "B01-B05 期望值已由 eyangisgod 于 2026-10-25 逐条确认；B02 期望值一次通过，B01/B03/B04/B05 按拍板意见修订"
@@ -632,7 +632,7 @@ meta:
   v13_changes:
     - "B01-B05 期望值由 eyangisgod 于 2026-10-25 逐条拍板；B02 一次通过"
     - "B03 落实 v1.2 变更记录声明但未落地的修正：last_touch_at 由 2026-10-20T10:01Z 改为 2026-10-20T12:01Z（距 now 恰 71h59m < 72h，DENY 成立）"
-    - "B04 total_spend_percentile 由 15 改为 0.5（Top 1% 内），使显式 global_suppression 与字段推导两条路径口径自洽，避免实现差异导致 CI 红"
+    - "B04 total_spend_percentile 统一为排名口径 99.5（>=99 即 Top 1%），使显式 global_suppression 与字段推导两条路径口径自洽，避免实现差异导致 CI 红"
     - "B05 platform_priority_overrides 由 douyin 改指 taobao：覆盖结论与键③『早者胜』结论反向，使本条对『覆盖优先于三键』具备判别力（原设计两者同向，覆盖失效时测试仍会通过）"
     - "平台口径统一：jd → douyin（全量），与合成数据生成器与产品主线（淘系+抖店+企微）一致"
     - "新增可选字段 allowed_platform（B01=null / B05=taobao），并写入 comparison_rule：存在时必须一致，缺省不校验"

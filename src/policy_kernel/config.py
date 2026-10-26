@@ -27,6 +27,7 @@ __all__ = [
     "ConflictResolution",
     "Distillation",
     "GovernanceConfig",
+    "RuleValidationError",
     "Segmentation",
     "Thresholds",
     "apply_overrides",
@@ -36,6 +37,16 @@ __all__ = [
 
 class ConfigError(ValueError):
     """配置错误。所有消息必须**可操作**：说清缺哪个项、去哪配、有哪些可选值。"""
+
+
+#: 配置校验错误的**专名**（T-B3 拆解验收点名了这个名字）。
+#:
+#: 做成**别名**而非子类，是为了让两边的 `except` 都成立：
+#:   - 既有调用方 `except ConfigError` —— 不受影响（别名即同一类型）；
+#:   - 新调用方 `except RuleValidationError` —— 能捕获本模块抛出的**全部**配置错误
+#:     （若改成子类，既有 `raise ConfigError(...)` 的异常反而捕不到，等于要求改写全部抛出点）。
+#: 详见《MVP_任务拆解.md》§三 · T-B3 与 `.trellis/tasks/10-26-t-b3-rule-load-failfast/prd.md` §2.1。
+RuleValidationError = ConfigError
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +144,11 @@ SCHEMA: dict[str, Field] = {
     "thresholds.conflict_window_hours": Field(_INT, "规则 3 冲突窗口（小时）", minimum=1),
     # 二、九宫格分层
     "segmentation.layer_score_base": Field(
-        _INT, "layer_score 乘数（layer_score = amount_score * base + recency_score）", minimum=2
+        _INT,
+        "分层乘数。**锁死 10**：附录D 规则 3 规定 layer_score = amount_score × 10 + "
+        "recency_score，且数据库 CHECK `chk_customer_segment_layer_score` 硬编码 ×10"
+        "（migrations/001_core_tables.sql:225）。改成别的值会在写库时被拒。",
+        allowed=(10,),
     ),
     "segmentation.amount.high_min_cents": Field(
         _INT, "金额档 high 的下界（分）；≥ 此值 = high = 3", minimum=0
@@ -188,6 +203,16 @@ SCHEMA: dict[str, Field] = {
         min_items=1,
     ),
 }
+
+#: **整值叶子**路径：SCHEMA 里 kind 为 `_DICT` 的项**整体作为一个叶子**，不递归摊平。
+#:
+#: 否则 `conflict_resolution.platform_priority_overrides` 的每个平台键都会被摊成
+#: `conflict_resolution.platform_priority_overrides.<平台>`，脱离 SCHEMA 登记 →
+#: 被当成未知字段拒绝，规则 3 的平台优先级覆盖在生产路径上永远装不进来。
+#: （拍板③，2026-10-26）
+WHOLE_VALUE_PATHS: frozenset[str] = frozenset(
+    path for path, spec in SCHEMA.items() if spec.kind == _DICT
+)
 
 
 # ---------------------------------------------------------------------------
@@ -274,11 +299,16 @@ class GovernanceConfig:
 
 
 def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
-    """把嵌套 dict 摊平成 "a.b.c" -> 值；空 dict 作为叶子保留。"""
+    """把嵌套 dict 摊平成 "a.b.c" -> 值；空 dict 作为叶子保留。
+
+    `WHOLE_VALUE_PATHS` 里的路径**不递归**（整值叶子，见该常量的说明）。
+    """
     out: dict[str, Any] = {}
     for key, value in data.items():
         path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict) and value:
+        if path in WHOLE_VALUE_PATHS:
+            out[path] = value
+        elif isinstance(value, dict) and value:
             out.update(_flatten(value, path))
         else:
             out[path] = value
@@ -516,11 +546,17 @@ def _flatten_overrides(overrides: dict[str, Any], prefix: str = "") -> dict[str,
 
     否则 `{"platform_priority_overrides": {}}` 这类「清空某项」的覆盖会被
     摊平成零个叶子，覆盖项凭空消失。
+
+    `WHOLE_VALUE_PATHS` 里的路径**不递归**（与 `_flatten` 同口径），
+    否则非空 `platform_priority_overrides` 的每个平台键都会各自变成叶子，
+    落在 `OVERRIDABLE_PATHS` 白名单外 → 被误拒。
     """
     out: dict[str, Any] = {}
     for key, value in overrides.items():
         path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict) and value:
+        if path in WHOLE_VALUE_PATHS:
+            out[path] = value
+        elif isinstance(value, dict) and value:
             out.update(_flatten_overrides(value, path))
         else:
             out[path] = value

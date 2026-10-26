@@ -1,0 +1,667 @@
+# ============================================================================
+# benchmark.yaml —— 策略判定评测标注基准（T-G1 夹具）
+#
+# 唯一抄录来源：docs/specs/评测标注基准_v1.3.yaml
+#   （v1.4 已由 eyangisgod 于 2026-10-26 拍板统一排名口径 + 投诉字段改名 90d，rule_version 2026-10-26.frozen）
+#
+# 纪律：
+#   1. 本文件是冻结件的**逐字副本**，数值一字不改；自「layers:」起与冻结件完全一致。
+#   2. 与冻结件的语义相等由
+#      tests/evaluation/test_benchmark_schema.py::test_benchmark_matches_frozen_source 强制
+#      ——防「标注件被悄悄改」。
+#   3. 本文件**先于** src/policy_kernel/rules.py 入库（附录D §3 标注顺序 ②→③）：
+#      期望值来自人工标注，**不得**由内核输出反推，否则「一致率 100%」是自我循环。
+#   4. rule_id 全部取自《附录D §4 规则 ID 登记表》（唯一权威），禁止自造 ID。
+#   5. 阈值（thresholds 块）与 governance.yaml 逐项相等，两处必须同改。
+#
+# 下方内容 = 冻结件全文（含其原始注释），未做任何「顺手修正」。
+# ============================================================================
+
+# GovernCRM 策略评测标注基准 v1.3
+# 冻结日期: 2026-10-25（v1.2 于 2026-10-24 冻结；v1.3 = 5 条边界样本逐条拍板后的定稿）
+# rule_version: "2026-10-26.frozen"
+# 标注纪律: 本文件先于 policy_kernel 入库。CI 用本文件对照内核输出，一致率须 100%。
+# 生产方式: AI 起草 (按 GovernCRM_附录D_冻结版.md) → eyangisgod 逐条拍板（2026-10-25）
+# 5 条边界样本(*) 期望值已由 eyangisgod 逐条确认（2026-10-25）
+
+# ─── 分层口径（裁决 #11，用于校验 global_segment / platform_segment 字段）───
+# 消费金额档: high(≥500) / mid(100-500) / low(<100)
+# 最近购买档: recent(≤30天) / mid(31-90天) / stale(>90天)
+# 九宫格 = 金额档 × 近度档，各层有 rule_id
+#
+# global_segment / platform_segment 字段填九宫格层名（如 "amount_mid_recent"），
+# 而非 "高/中/低"。规则3键①按平台局部层名比较：amount > mid_amount > recent >
+# ... 实际比较规则：见下方 layers.partial_order。
+#
+# 层间优先级（"更高层级 = 对客户更有价值"，裁决 #14）：
+#   第一维 金额档: high(3) > mid(2) > low(1)
+#   第二维 近度档: recent(3) > mid(2) > stale(1)
+#   合成层级分 = 金额档分 * 10 + 近度档分（11..33），数值大者层级更高
+layers:
+  partial_order: "layer_score = amount_score * 10 + recency_score"
+  amount_score: {high: 3, mid: 2, low: 1}
+  recency_score: {recent: 3, mid: 2, stale: 1}
+
+# ─── 净值折算（规则 5，附录D 冻结版）───
+# net_value = max(0, coupon_value - max(0, coupon_threshold - customer_avg_order_value_90d))
+net_value:
+  formula: "max(0, coupon_value - max(0, coupon_threshold - customer_avg_order_value_90d))"
+  floor: 0
+  window_days: 90
+
+# ─── 抑制红线阈值（规则 1a）───
+# SUP_HIGH_REFUND 不做 2σ 统计（MVP 无历史样本、统计口径不可复现），改用固定阈值常量。
+thresholds:
+  complaint_window_days: 90
+  refund_rate_threshold: 0.20          # 退款率 > 0.20 判定命中
+  refund_dispute_window_days: 90      # 近 90 天存在纠纷亦命中
+  high_value_percentile: 1.0           # 消费金额 Top 1%
+  freq_window_days: 7
+  freq_max_touches: 2
+  channel_cooldown_hours: 72
+  conflict_window_hours: 72
+
+# ─── 时间锚点（所有"距今"判定的基准，缺省则不可复现）───
+now: "2026-10-23T12:00:00Z"
+
+benchmarks:
+  # ═══════════ 简单样本 (15条) ═══════════
+
+  - id: S01
+    description: "正常沉睡客户，无风险，单候选首次触达"
+    customer:
+      avg_order_value_90d: 120
+      last_purchase_days_ago: 45
+      total_spend_percentile: 50
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 20
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_mid"      # 金额120→mid, 45天→mid
+    expected:
+      conclusion: ALLOW
+      hit_rule_ids: []
+      note: "无抑制/无频控/单候选 → 直接放行"
+
+  - id: S02
+    description: "Top 1% 高价值客户 → SUP_HIGH_VALUE DENY + 转人工"
+    customer:
+      avg_order_value_90d: 500
+      last_purchase_days_ago: 20
+      total_spend_percentile: 99.5
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 30
+        coupon_threshold: 200
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_high_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_HIGH_VALUE"]
+      note: "Top 1% → SUP_HIGH_VALUE 红线 DENY + 转人工跟进队列"
+
+  - id: S03
+    description: "明确拒绝营销 → SUP_EXPLICIT_REFUSAL DENY"
+    customer:
+      avg_order_value_90d: 80
+      last_purchase_days_ago: 60
+      total_spend_percentile: 40
+      complaint_count_90d: 0
+      refund_rate: 0.03
+      explicit_refusal: true
+      has_marketing_consent: true      # 有授权，但明示拒绝仍 DENY
+    candidates:
+      - platform: douyin
+        coupon_value: 15
+        coupon_threshold: 50
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 1
+    last_touch_channel: sms
+    last_touch_at: "2026-10-20T09:00:00Z"
+    global_segment: "amount_low_mid"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_EXPLICIT_REFUSAL"]
+      note: "明示拒绝是红线，与授权状态无关；单独覆盖该红线"
+
+  - id: S04
+    description: "无营销授权 → NO_CONSENT DENY"
+    customer:
+      avg_order_value_90d: 60
+      last_purchase_days_ago: 30
+      total_spend_percentile: 30
+      complaint_count_90d: 0
+      refund_rate: 0.03
+      explicit_refusal: false
+      has_marketing_consent: false
+    candidates:
+      - platform: douyin
+        coupon_value: 15
+        coupon_threshold: 50
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["NO_CONSENT"]
+      note: "无授权 → 发送前校验 DENY"
+
+  - id: S05
+    description: "投诉客户 → SUP_HIGH_COMPLAINT DENY"
+    customer:
+      avg_order_value_90d: 60
+      last_purchase_days_ago: 30
+      total_spend_percentile: 30
+      complaint_count_90d: 2
+      refund_rate: 0.05
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 10
+        coupon_threshold: 50
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_HIGH_COMPLAINT"]
+      note: "近30天投诉≥1 → 抑制红线 DENY"
+
+  - id: S06
+    description: "高退款率客户 → SUP_HIGH_REFUND DENY"
+    customer:
+      avg_order_value_90d: 90
+      last_purchase_days_ago: 15
+      total_spend_percentile: 55
+      complaint_count_90d: 0
+      refund_rate: 0.35
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: douyin
+        coupon_value: 25
+        coupon_threshold: 150
+        created_at: "2026-10-23T10:00:00Z"
+        channel: email
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_HIGH_REFUND"]
+      note: "退款率超均值2σ → 抑制红线 DENY"
+
+  - id: S07
+    description: "频控第2次触达（合法，≤2 语义）"
+    customer:
+      avg_order_value_90d: 100
+      last_purchase_days_ago: 40
+      total_spend_percentile: 45
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 15
+        coupon_threshold: 80
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 1
+    last_touch_channel: email
+    last_touch_at: "2026-10-20T09:00:00Z"
+    global_segment: "amount_mid_mid"
+    expected:
+      conclusion: ALLOW
+      hit_rule_ids: []
+      note: "7天内触达1次，本次=第2次 → 合法（裁决#12 ≤2）；跨通道>72h → ALLOW"
+
+  - id: S08
+    description: "同通道72h内再次触达 → FREQ_GLOBAL_7D DENY"
+    customer:
+      avg_order_value_90d: 100
+      last_purchase_days_ago: 25
+      total_spend_percentile: 50
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 20
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 1
+    last_touch_channel: sms
+    last_touch_at: "2026-10-22T09:00:00Z"   # 距 now(10-23T12:00) = 27h < 72h
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["FREQ_GLOBAL_7D"]
+      note: "同通道(sms)距上次 25h < 72h → DENY（延迟类）"
+
+  - id: S09
+    description: "跨平台双候选 → 平台局部层级高者胜"
+    customer:
+      avg_order_value_90d: 150
+      last_purchase_days_ago: 25
+      total_spend_percentile: 60
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 20
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_mid_recent"    # 层级分 23
+      - platform: douyin
+        coupon_value: 15
+        coupon_threshold: 80
+        created_at: "2026-10-23T09:00:00Z"
+        channel: email
+        platform_segment: "amount_low_recent"    # 层级分 13 → 键① 落败
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: ALLOW          # taobao 候选放行
+      hit_rule_ids: []
+      suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]   # 被抑制的是另一候选，不是本候选命中
+      suppressed_candidates: 1
+      note: "键①平台局部层级：淘系 mid(23) > 抖店 low(13) → 淘系胜出，无需比净值"
+
+  - id: S10
+    description: "层级与净值均平 → 创建时间早者胜"
+    customer:
+      avg_order_value_90d: 200
+      last_purchase_days_ago: 20
+      total_spend_percentile: 70
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_mid_recent"
+      - platform: douyin
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T09:00:00Z"     # 更早
+        channel: email
+        platform_segment: "amount_mid_recent"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: ALLOW          # douyin 候选放行（键③ 早）
+      hit_rule_ids: []
+      suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
+      suppressed_candidates: 1
+      note: "键①层级相同、键②净值相同(25−0=25) → 键③创建时间早者(09:00)胜出"
+
+  - id: S11
+    description: "净值高者胜（门槛可覆盖，净值不同）"
+    customer:
+      avg_order_value_90d: 200
+      last_purchase_days_ago: 20
+      total_spend_percentile: 70
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 30
+        coupon_threshold: 150
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_mid_recent"
+      - platform: douyin
+        coupon_value: 30
+        coupon_threshold: 300
+        created_at: "2026-10-23T09:00:00Z"
+        channel: email
+        platform_segment: "amount_mid_recent"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: ALLOW          # taobao 候选
+      hit_rule_ids: []
+      suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
+      suppressed_candidates: 1
+      note: "键①同。键②净值：淘系=30−max(0,150−200)=30−0=30；抖店=30−max(0,300−200)=30−100=0 → 淘系胜出"
+
+  - id: S12
+    description: "两券净值均为0 → 按创建时间早者"
+    customer:
+      avg_order_value_90d: 50
+      last_purchase_days_ago: 30
+      total_spend_percentile: 25
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 20
+        coupon_threshold: 200
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_low_recent"
+      - platform: douyin
+        coupon_value: 25
+        coupon_threshold: 250
+        created_at: "2026-10-23T09:00:00Z"
+        channel: email
+        platform_segment: "amount_low_recent"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_recent"
+    expected:
+      conclusion: ALLOW          # douyin 候选（净值同为0，按时间早）
+      hit_rule_ids: []
+      suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
+      suppressed_candidates: 1
+      note: "净值下限0：淘系=20−150=−130→0；抖店=25−200=−175→0 → 键②平 → 键③时间早(09:00)胜出"
+
+  - id: S13
+    description: "全局层级高、平台局部层级低 → 权益按更高层（全局）执行"
+    customer:
+      avg_order_value_90d: 300
+      last_purchase_days_ago: 10
+      total_spend_percentile: 85
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 50
+        coupon_threshold: 200
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_low_recent"    # 平台局部低
+    touch_history_7d: 1
+    last_touch_channel: email
+    last_touch_at: "2026-10-19T09:00:00Z"
+    global_segment: "amount_mid_recent"        # 全局高
+    expected:
+      conclusion: ALLOW
+      hit_rule_ids: []
+      note: "规则4分维度：权益取更高层(全局 high)；抑制/频控无命中 → ALLOW"
+
+  - id: S14
+    description: "全局层级低、平台局部层级高 → 权益仍按更高层（平台）执行"
+    customer:
+      avg_order_value_90d: 300
+      last_purchase_days_ago: 10
+      total_spend_percentile: 85
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 50
+        coupon_threshold: 200
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_high_recent"   # 平台局部高
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"         # 全局 score=23
+    expected:
+      conclusion: ALLOW
+      hit_rule_ids: []
+      note: "规则4分维度：权益取更高层(平台 high)；无抑制/无频控 → ALLOW"
+
+  - id: S15
+    description: "多红线同时命中（明确拒绝 + 无授权）→ DENY 且记录全部命中的 rule_id"
+    customer:
+      avg_order_value_90d: 80
+      last_purchase_days_ago: 60
+      total_spend_percentile: 40
+      complaint_count_90d: 0
+      refund_rate: 0.03
+      explicit_refusal: true
+      has_marketing_consent: false
+    candidates:
+      - platform: taobao
+        coupon_value: 15
+        coupon_threshold: 50
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_mid"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_EXPLICIT_REFUSAL", "NO_CONSENT"]
+      suppressed_rule_ids: []
+      note: "规则1：四红线(1a)与 NO_CONSENT(1b) 均命中 → DENY，且写 suppression_record 时全量记录两个 rule_id，不只记第一个"
+
+  # ═══════════ 边界样本 (5条, 已由 eyangisgod 逐条拍板 2026-10-25) ═══════════
+
+  - id: B01  # (*)
+    description: "*边界: 三键全平（层级同+净值同+时间同）→ 升级人工"
+    customer:
+      avg_order_value_90d: 200
+      last_purchase_days_ago: 20
+      total_spend_percentile: 65
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00.000Z"
+        channel: sms
+        platform_segment: "amount_mid_recent"
+      - platform: douyin
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00.000Z"     # 同一毫秒
+        channel: email
+        platform_segment: "amount_mid_recent"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: REQUIRE_APPROVAL
+      hit_rule_ids: ["ESCALATE_HUMAN"]
+      suppressed_rule_ids: []
+      suppressed_candidates: 0
+      allowed_platform: null       # 无候选放行：全部挂起转人工
+      note: "键①同层、键②净值同(25−0=25)、键③同一时刻 → 规则6升级人工(E5)，不默认放行。已拍板（2026-10-25）：期望值确认"
+
+  - id: B02  # (*)
+    description: "*边界: 频控恰好第3次 → DENY"
+    customer:
+      avg_order_value_90d: 150
+      last_purchase_days_ago: 20
+      total_spend_percentile: 60
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 20
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 2                            # 已有2次，本次=第3次
+    last_touch_channel: email
+    last_touch_at: "2026-10-19T09:00:00Z"
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["FREQ_GLOBAL_7D"]
+      note: "7天滚动窗口内触达2次，本次为第3次 → 超出 ≤2 上限 → DENY。已拍板（2026-10-25）：期望值确认"
+
+  - id: B03  # (*)
+    description: "*边界: 同通道距上次 71h59min（<72h）→ DENY"
+    customer:
+      avg_order_value_90d: 120
+      last_purchase_days_ago: 25
+      total_spend_percentile: 55
+      complaint_count_90d: 0
+      refund_rate: 0.02
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 15
+        coupon_threshold: 80
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+    touch_history_7d: 1
+    last_touch_channel: sms
+    last_touch_at: "2026-10-20T12:01:00Z"    # 距 now(10-23T12:00) 恰 71h59min < 72h
+    global_segment: "amount_mid_recent"
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["FREQ_GLOBAL_7D"]
+      note: "同通道冷却 72h 未满（距 now 恰 71h59min）→ DENY。已拍板（2026-10-25）：last_touch_at 修正为 2026-10-20T12:01Z，贴住 72h 边界"
+
+  - id: B04  # (*)
+    description: "*边界: 全局抑制 vs 平台无抑制 → 抑制取严 → DENY"
+    customer:
+      avg_order_value_90d: 40
+      last_purchase_days_ago: 150
+      total_spend_percentile: 99.5            # 排名口径 Top 1%（>=99），与 SUP_HIGH_VALUE 自洽
+      complaint_count_90d: 0
+      refund_rate: 0.03
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 5
+        coupon_threshold: 30
+        created_at: "2026-10-23T10:00:00Z"
+        channel: sms
+        platform_segment: "amount_low_stale"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_low_stale"
+    global_suppression: ["SUP_HIGH_VALUE"]      # 全局层命中抑制，平台层未命中
+    platform_suppression: []
+    expected:
+      conclusion: DENY
+      hit_rule_ids: ["SUP_HIGH_VALUE"]
+      note: "规则4分维度：抑制取更严一档 → 全局层 DENY 胜出。已拍板（2026-10-25）：期望值确认；total_spend_percentile 统一为排名口径 99.5（>=99 即 Top 1%），使显式 global_suppression 与字段推导两条路径口径自洽（层级分歧的抑制侧，与 S13/S14 的权益侧互为对照）"
+
+  - id: B05  # (*)
+    description: "*边界: 平台优先级覆盖 (platform_priority_overrides) 生效"
+    customer:
+      avg_order_value_90d: 200
+      last_purchase_days_ago: 20
+      total_spend_percentile: 65
+      complaint_count_90d: 0
+      refund_rate: 0.01
+      explicit_refusal: false
+      has_marketing_consent: true
+    candidates:
+      - platform: taobao
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T10:00:00Z"     # 淘系更晚
+        channel: sms
+        platform_segment: "amount_mid_recent"
+      - platform: douyin
+        coupon_value: 25
+        coupon_threshold: 100
+        created_at: "2026-10-23T09:00:00Z"    # 抖店更早
+        channel: email
+        platform_segment: "amount_mid_recent"
+    touch_history_7d: 0
+    last_touch_channel: null
+    last_touch_at: null
+    global_segment: "amount_mid_recent"
+    governance_overrides:
+      platform_priority_overrides:
+        taobao: 200        # 显式配置把淘系优先级提到抖店之上
+    expected:
+      conclusion: ALLOW          # taobao 候选（覆盖项优先于三键；与键③"早者胜"结论相反）
+      allowed_platform: taobao   # 显式断言放行候选——覆盖失效时本条必须失败
+      hit_rule_ids: []
+      suppressed_rule_ids: ["CONFLICT_WINDOW_72H"]
+      suppressed_candidates: 1
+      note: "规则3兜底：platform_priority_overrides 优先于三键——三键(键③早者胜)指向抖店，覆盖指向淘系，二者反向 → 唯一正确答案=淘系。已拍板（2026-10-25）：覆盖项改指 taobao，使本条具备判别力"
+
+# ═══════════ 元信息 ═══════════
+meta:
+  version: "1.4"
+  total_samples: 20
+  simple_samples: 15
+  boundary_samples: 5
+  frozen_at: "2026-10-25"
+  rule_version: "2026-10-26.frozen"
+  rule_source: "docs/specs/GovernCRM_附录D_冻结版.md"
+  review_status: "已由 eyangisgod 逐条拍板（2026-10-25）"
+  boundary_review_note: "B01-B05 期望值已由 eyangisgod 于 2026-10-25 逐条确认；B02 期望值一次通过，B01/B03/B04/B05 按拍板意见修订"
+  rule_id_registry: "docs/specs/GovernCRM_附录D_冻结版.md §4 规则 ID 登记表"
+  comparison_rule: "CI 对照口径：conclusion 必须完全一致；hit_rule_ids 必须完全一致（集合）；suppressed_rule_ids 必须完全一致（集合）；suppressed_candidates 数量必须一致；allowed_platform 存在时必须与实际放行候选一致（缺省视为不校验）"
+  known_gap: "简单样本(S01-S15)的多候选胜者未以字段断言，仅在 note 中描述——规则3 选错胜者但结论仍 ALLOW 时不会触发失败。v1.3 仅对 B01/B05 引入 allowed_platform 断言；补齐简单样本字段留待后续版本"
+  v13_changes:
+    - "B01-B05 期望值由 eyangisgod 于 2026-10-25 逐条拍板；B02 一次通过"
+    - "B03 落实 v1.2 变更记录声明但未落地的修正：last_touch_at 由 2026-10-20T10:01Z 改为 2026-10-20T12:01Z（距 now 恰 71h59m < 72h，DENY 成立）"
+    - "B04 total_spend_percentile 统一为排名口径 99.5（>=99 即 Top 1%），使显式 global_suppression 与字段推导两条路径口径自洽，避免实现差异导致 CI 红"
+    - "B05 platform_priority_overrides 由 douyin 改指 taobao：覆盖结论与键③『早者胜』结论反向，使本条对『覆盖优先于三键』具备判别力（原设计两者同向，覆盖失效时测试仍会通过）"
+    - "平台口径统一：jd → douyin（全量），与合成数据生成器与产品主线（淘系+抖店+企微）一致"
+    - "新增可选字段 allowed_platform（B01=null / B05=taobao），并写入 comparison_rule：存在时必须一致，缺省不校验"
+  v12_changes:
+    - "新增 now 时间锚点（2026-10-23T12:00:00Z）——7 天窗口/72h 冷却判定全部以它为基准，否则不可复现"
+    - "B03 重算：last_touch_at 改 2026-10-20T12:01Z，距 now 恰 71h59min → DENY（真正贴住边界）"
+    - "删除原 S15（与 S11 重复且分层标签错误），新 S15 改为测试「多红线同时命中 → 记录全部 rule_id」，补上规则1 的多命中覆盖缺口"
+    - "hit_rule_ids 与 suppressed_rule_ids 分离：ALLOW 样本的 CONFLICT_WINDOW_72H 属「另一候选被抑制」，不计入本候选命中"
+    - "S08/S13/B03 分层标签按 layer_score 口径重算修正"
+    - "新增 thresholds 常量块（投诉窗口 90 天 / 退款率阈值 0.20 / 频控 7 天 ≤2 / 同通道 72h / 冲突窗口 72h）——规则1 的判定输入不再依赖隐含统计量"
+    - "规则 3 键①改为 layer_score 比较（九宫格 9 层，非三档）"
+    - "规则 4 删除「全局层级 > 平台层级」固定序，改为按 layer_score 比较"
+    - "规则 1 投诉窗口 30 天 → 90 天；退款条件改为「近 90 天有纠纷 或 退款率 > 阈值」（对齐架构 v5.2 §10.1）"
