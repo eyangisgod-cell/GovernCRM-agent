@@ -110,15 +110,33 @@ class _FakeCursor:
         return None
 
 
+class _FakeTransaction:
+    """假事务：只记录进出嵌套深度，不连库。"""
+
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> _FakeTransaction:
+        self._connection.transaction_depth += 1
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._connection.transaction_depth -= 1
+
+
 class _FakeConnection:
     """假连接：只记录 SQL，不连库。"""
 
     def __init__(self) -> None:
         self.statements: list[tuple[str, Any]] = []
         self.last_query = ""
+        self.transaction_depth = 0
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
+
+    def transaction(self) -> _FakeTransaction:
+        return _FakeTransaction(self)
 
 
 class _DenyAllGate:

@@ -38,7 +38,8 @@ from typing import Any, Protocol
 
 from psycopg.types.json import Jsonb
 
-from src.audit.hash_chain import GENESIS_HASH, insert_statement_sql
+from src.audit.chain import chain_tip, chain_write_transaction, retry_on_chain_conflict
+from src.audit.hash_chain import insert_statement_sql
 from src.providers.protocols import (
     ALLOW_LIKE_CHOICES,
     CONFIDENCE_HIGH,
@@ -135,9 +136,13 @@ class ConnectionLike(Protocol):
     `cursor()` 的返回类型放宽为 `Any`：`psycopg.Connection.cursor` 是重载签名，
     与具体的游标协议在类型层面不兼容，而本写入器只用到 `execute` / `fetchone` /
     上下文管理器三项能力。
+
+    `transaction()` 用于把「取链尾 + 插入」关进同一事务（红线③：并发写不断链）。
     """
 
     def cursor(self) -> Any: ...
+
+    def transaction(self) -> Any: ...
 
 
 # -------------------------------------------------------------------------- 工具函数
@@ -151,16 +156,7 @@ def _digest_int(*parts: object) -> int:
 
 def _last_record_hash(connection: ConnectionLike, tenant_id: str) -> str:
     """取该租户链上最后一条记录的哈希（无记录时为创世值）。"""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "select record_hash from audit_log where tenant_id = %s::uuid "
-            "order by record_seq desc limit 1",
-            (tenant_id,),
-        )
-        row = cursor.fetchone()
-    if row is None:
-        return GENESIS_HASH
-    return str(row[0])
+    return chain_tip(connection, tenant_id)
 
 
 def pg_audit_writer(connection: ConnectionLike) -> AuditWriter:
@@ -174,35 +170,41 @@ def pg_audit_writer(connection: ConnectionLike) -> AuditWriter:
     """
 
     def _write(entry: AuditEntry) -> None:
-        prev_hash = _last_record_hash(connection, entry.tenant_id)
-        # 占位符顺序必须严格等于 HASHED_FIELDS 顺序 + prev_hash。
-        values: list[Any] = [
-            entry.tenant_id,
-            entry.trace_id,
-            entry.task_id,
-            None,  # worker_id
-            None,  # decision_id
-            None,  # approval_id
-            "provider",  # actor_type（audit_log CHECK 允许 system/user/agent/provider）
-            None,  # actor_id
-            None,  # actor_role
-            entry.action_type,
-            entry.object_type,
-            entry.object_id,
-            list(entry.hit_rule_ids),
-            entry.model_version,
-            entry.prompt_version,
-            entry.skill_version,
-            entry.rule_version,
-            Jsonb(dict(entry.input_snapshot)),
-            Jsonb(dict(entry.evidence)),
-            Jsonb(dict(entry.payload)),
-            "sha256",
-            prev_hash,
-        ]
-        with connection.cursor() as cursor:
-            cursor.execute(insert_statement_sql(), values)
-            cursor.fetchone()
+        def _insert() -> None:
+            # 取链尾与插入同事务、同租户串行（红线③：并发写不断链）。
+            with chain_write_transaction(connection, entry.tenant_id):
+                prev_hash = _last_record_hash(connection, entry.tenant_id)
+                # 占位符顺序必须严格等于 HASHED_FIELDS 顺序 + prev_hash。
+                values: list[Any] = [
+                    entry.tenant_id,
+                    entry.trace_id,
+                    entry.task_id,
+                    None,  # worker_id
+                    None,  # decision_id
+                    None,  # approval_id
+                    "provider",  # actor_type（audit_log CHECK 允许 system/user/agent/provider）
+                    None,  # actor_id
+                    None,  # actor_role
+                    entry.action_type,
+                    entry.object_type,
+                    entry.object_id,
+                    list(entry.hit_rule_ids),
+                    entry.model_version,
+                    entry.prompt_version,
+                    entry.skill_version,
+                    entry.rule_version,
+                    Jsonb(dict(entry.input_snapshot)),
+                    Jsonb(dict(entry.evidence)),
+                    Jsonb(dict(entry.payload)),
+                    "sha256",
+                    prev_hash,
+                ]
+                with connection.cursor() as cursor:
+                    cursor.execute(insert_statement_sql(), values)
+                    cursor.fetchone()
+
+        # 链尾被并发写入方抢占（唯一约束冲突）→ 重读链尾重试一次；再失败则异常上抛。
+        retry_on_chain_conflict(_insert)
 
     return _write
 
