@@ -858,6 +858,269 @@ def test_pending_cleanup_does_not_cross_trace_groups() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 第三轮阻断缺陷：跨租户 / 跨任务组串味
+#   ① 派发结算缺 tenant 维度 → 跨租户误清理，候选**静默消失**
+#   ② 恢复结论拍平成并集 → 跨任务 / 跨租户错发 + 审计行租户与任务错位
+# ---------------------------------------------------------------------------
+
+
+def _context_for(candidate_id: str, customer_id: str = "CUST-1") -> RejudgeContext:
+    """指定候选的判定输入快照（一个候选一份上下文，便于按组隔离）。"""
+    return RejudgeContext(
+        customer_rows=(_customer_row(customer_id),),
+        candidate_rows=(_candidate_row(candidate_id, customer_id),),
+        tool_call_rows=(_tool_call_row(called_at=_NOW - timedelta(days=1)),),
+        suppression_rows=(),
+    )
+
+
+def test_settle_dispatched_keeps_same_candidate_in_other_tenant() -> None:
+    """阻断缺陷 A①：同名候选分属两个租户 → 派发其中一个**不得**清掉另一个。
+
+    缺陷形态：``_settle_dispatched`` 的匹配键只有 ``(trace_id, candidate_id)``，
+    **租户维度缺失** → 租户 A 派发 ``CAND-X`` 时，租户 B 同名的 ``CAND-X`` 被连带
+    清出挂起队列 → 该候选**静默消失**（无 DENY 留痕、无审计，后续也上报不到）。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, _ = _make_breaker(config_loader=lambda: config)
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant_a)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-A"),
+        tenant_id=tenant_a,
+        trace_id="trace-A",
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-B"),
+        tenant_id=tenant_b,
+        trace_id="trace-A",
+    )
+    assert len(breaker.pending_actions) == 2, "两个租户的同名候选必须各自入队"
+
+    breaker.reset(reason="operator-resume", actor="operator")
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-A"),
+        tenant_id=tenant_a,
+        trace_id="trace-A",
+    )
+
+    remaining_tenants = [action.tenant_id for action in breaker.pending_actions]
+    assert remaining_tenants == [tenant_b], "派发租户 A 的候选不得连带清掉租户 B 的同名候选"
+
+
+def test_settle_dispatched_keeps_same_candidate_in_other_trace() -> None:
+    """阻断缺陷 A②：同租户、同候选 id、不同轨迹 → 派发一个不得影响另一个。
+
+    缺陷形态：``_ready`` 是**扁平候选 id 列表**（跨租户 / 跨轨迹共享）→ 派发
+    trace-A 的候选时按 candidate_id 把 trace-B 的待派发条目一并删掉（待派发集合
+    被跨轨迹清空 = 候选静默消失）；且同名条目在两个组里**合并成一条**，其中一个
+    组的放行结论被吞掉。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, _ = _make_breaker(config_loader=lambda: config)
+    tenant = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-A"),
+        tenant_id=tenant,
+        trace_id="trace-A",
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-B"),
+        tenant_id=tenant,
+        trace_id="trace-B",
+    )
+
+    breaker.reset(reason="operator-resume", actor="operator")
+    assert len(breaker.ready_entries) == 2, "两个轨迹组的待派发条目必须各自独立"
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-A"),
+        tenant_id=tenant,
+        trace_id="trace-A",
+    )
+
+    assert len(breaker.pending_actions) == 1, "另一轨迹组的候选不得被连带清出队列"
+    assert breaker.pending_actions[0].trace_id == "trace-B"
+    assert (tenant, "trace-B", "CAND-X") in breaker.ready_entries, (
+        "另一轨迹组的待派发条目不得被连带清掉（候选不得静默消失）"
+    )
+
+
+def test_ready_set_is_scoped_by_tenant_and_trace() -> None:
+    """阻断缺陷 A③：待派发集合必须按 ``(租户, 轨迹, 候选)`` 分组，不得跨组串扰。
+
+    缺陷形态：``_ready`` 是扁平候选 id 列表 → 两个租户的同名候选在待派发集合里
+    **合并成一条**（其中一个租户 / 轨迹的放行结论被吞掉 → 该组候选再也派不出去）。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, _ = _make_breaker(config_loader=lambda: config)
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant_a)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-A"),
+        tenant_id=tenant_a,
+        trace_id="trace-A",
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-X"],
+        context=_context_for("CAND-X", "CUST-B"),
+        tenant_id=tenant_b,
+        trace_id="trace-B",
+    )
+
+    breaker.reset(reason="operator-resume", actor="operator")
+
+    entries = breaker.ready_entries
+    assert len(entries) == 2, "两个租户的同名候选必须各有各的待派发条目"
+    assert {entry[0] for entry in entries} == {tenant_a, tenant_b}
+    assert {entry[1] for entry in entries} == {"trace-A", "trace-B"}
+
+
+def test_reset_does_not_mix_candidates_across_tenants() -> None:
+    """阻断缺陷 B①：恢复结论必须**按组**给出，不得拍平成跨租户并集。
+
+    缺陷形态：``reset()`` 把各组放行集合 ``extend`` 成一个并集 → 「恢复任务 B」
+    会把「任务 A（另一租户）」的候选一起派发出去（跨任务 / 跨租户错发）。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, _ = _make_breaker(config_loader=lambda: config)
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant_a)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-A"],
+        context=_context_for("CAND-A", "CUST-A"),
+        tenant_id=tenant_a,
+        trace_id="trace-A",
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-B"],
+        context=_context_for("CAND-B", "CUST-B"),
+        tenant_id=tenant_b,
+        trace_id="trace-B",
+    )
+
+    outcome = breaker.reset(reason="operator-resume", actor="operator")
+
+    assert len(outcome.groups) == 2, "恢复结论必须按 (租户, 轨迹) 分组保留"
+    group_a = outcome.group_for(tenant_id=tenant_a, trace_id="trace-A")
+    group_b = outcome.group_for(tenant_id=tenant_b, trace_id="trace-B")
+    assert group_a is not None, "A 组结论必须可按 (租户, 轨迹) 取到"
+    assert group_b is not None, "B 组结论必须可按 (租户, 轨迹) 取到"
+    assert group_a.sendable_candidate_ids == ("CAND-A",), "A 组只含 A 组的候选"
+    assert group_b.sendable_candidate_ids == ("CAND-B",), "B 组只含 B 组的候选"
+    # 扁平字段是**只读聚合视图**（仅供展示，不可用于派发）。
+    assert set(outcome.sendable_candidate_ids) == {"CAND-A", "CAND-B"}
+
+
+def test_reset_writes_one_resume_event_per_group() -> None:
+    """阻断缺陷 B②：恢复收尾事件**按组各写一条**，字段全部取自本组。
+
+    缺陷形态：只写一条合并事件 → ``tenant_id`` / ``trace_id`` 取首个组，
+    ``task_id`` / ``worker_id`` 却取自**全部组** → 一条审计行里租户与任务错位
+    （审计反查不到正确的租户与任务）；其余组更是没有任何恢复事件。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, recorder = _make_breaker(config_loader=lambda: config)
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    task_a = uuid.uuid4()
+    task_b = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant_a)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-A"],
+        context=_context_for("CAND-A", "CUST-A"),
+        tenant_id=tenant_a,
+        trace_id="trace-A",
+        task_id=task_a,
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-B"],
+        context=_context_for("CAND-B", "CUST-B"),
+        tenant_id=tenant_b,
+        trace_id="trace-B",
+        task_id=task_b,
+    )
+
+    breaker.reset(reason="operator-resume", actor="operator")
+
+    resume_events = [e for e in recorder.events if e.action_type == ACTION_CIRCUIT_RESUME]
+    assert len(resume_events) == 2, "每个分组必须各写一条恢复事件"
+    by_trace = {event.trace_id: event for event in resume_events}
+    assert by_trace["trace-A"].tenant_id == tenant_a
+    assert by_trace["trace-A"].task_id == task_a
+    assert by_trace["trace-B"].tenant_id == tenant_b
+    assert by_trace["trace-B"].task_id == task_b
+
+
+def test_dispatch_rejudged_only_dispatches_current_task_group() -> None:
+    """阻断缺陷 B③：恢复任务 B 只能派发 **B 自己**的候选；A 的候选留在队列。
+
+    缺陷形态：``_dispatch_rejudged`` 直接取 ``outcome.sendable_candidate_ids``
+    （跨组并集）→ 任务 B 恢复时把任务 A 的候选在 B 的任务 / 租户下派发出去。
+    """
+    config = _config_with(version=_CURRENT_RULE_VERSION, freq_max_touches=_BASE_FREQ_MAX_TOUCHES)
+    breaker, _ = _make_breaker(config_loader=lambda: config)
+    tenant = uuid.uuid4()
+    task_a = uuid.uuid4()
+    task_b = uuid.uuid4()
+    breaker.trip(reason="manual-stop", actor="operator", tenant_id=tenant)
+
+    breaker.before_dispatch(
+        candidate_ids=["CAND-A"],
+        context=_context_for("CAND-A", "CUST-A"),
+        tenant_id=tenant,
+        trace_id=f"task-{task_a}",
+        task_id=task_a,
+    )
+    breaker.before_dispatch(
+        candidate_ids=["CAND-B"],
+        context=_context_for("CAND-B", "CUST-B"),
+        tenant_id=tenant,
+        trace_id=f"task-{task_b}",
+        task_id=task_b,
+    )
+
+    state: workflow.GraphState = {
+        "task_id": str(task_b),
+        "worker_id": "1",
+        "tenant_id": str(tenant),
+        "now": _NOW,
+        "customer_rows": [_customer_row("CUST-B")],
+        "candidate_rows": [_candidate_row("CAND-B", "CUST-B")],
+        "tool_call_rows": [],
+        "suppression_rows": [],
+        "visited_nodes": list(workflow.PIPELINE_NODES),
+    }
+
+    resumed = workflow.resume_and_dispatch(state, breaker=breaker)
+
+    sent_ids = [str(item["candidate_id"]) for item in resumed.get("sent", [])]
+    assert sent_ids == ["CAND-B"], "恢复任务 B 只能派发 B 自己的候选"
+    assert "CAND-A" in breaker.pending_candidate_ids, (
+        "任务 A 的候选必须留在熔断挂起队列（不是丢弃）"
+    )
+    assert resumed.get("deferred_candidate_ids", []) == ["CAND-A"], (
+        "其它组的放行候选必须显式上报（不得静默消失）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 分层守卫：graph 层零 DB 依赖 + 审计链尾口径只有一份
 # ---------------------------------------------------------------------------
 

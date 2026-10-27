@@ -11,6 +11,11 @@
 - ``prev_hash`` = 该租户链尾的 ``record_hash``（首条为创世值 64 个 '0'）；
 - 写入方与链校验脚本（``src/audit/hash_chain.py``）共用同一段 SQL 表达式——
   「字段规范化口径不一致 → 校验永远失败」的唯一解法是口径只有一份。
+
+**原子性（红线③：哈希链不可断）**：取链尾与插入落在**同一事务**内，且同租户写入
+经 ``pg_advisory_xact_lock`` 串行（``src/audit/chain.py`` 是唯一实现点）。
+分两步走（autocommit + 两次往返）会留下竞态窗口：两个写入方读到同一链尾 →
+两条记录挂同一 ``prev_hash`` → 链断。
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from src.audit.chain import chain_tip
+from src.audit.chain import chain_tip, chain_write_transaction, retry_on_chain_conflict
 from src.audit.hash_chain import insert_statement_sql
 
 if TYPE_CHECKING:
@@ -58,34 +63,19 @@ class AuditEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
 
-def write_audit_event(
-    event: AuditEvent,
-    *,
-    conn: psycopg.Connection[tuple[object, ...]] | None = None,
+def _insert_audit_row(
+    conn: psycopg.Connection[tuple[object, ...]], event: AuditEvent
 ) -> tuple[str, int, str]:
-    """写入一条审计事件（红线③：唯一走 ``insert_statement_sql()``）。
+    """在**同一事务**内「取链尾 → 插入」一条审计记录（红线③：哈希链不可断）。
 
-    ``record_hash`` 由数据库算出（调用方不传）。``conn`` 缺省时按 ``DATABASE_URL``
-    自建连接（生产路径）；测试可注入真 PG 连接。返回
-    ``(audit_id, record_seq, record_hash)``。
+    事务 + 同租户 advisory 写锁由 ``chain_write_transaction`` 统一提供
+    （``src/audit/chain.py`` 是唯一实现点）：锁在取链尾之前拿，两个写入方
+    不可能读到同一链尾。
     """
     # 局部 import：只有真正写库的路径才需要 DB 驱动（审计层其余部分零 DB 依赖）。
-    import psycopg
     from psycopg.types.json import Jsonb
 
-    owns_connection = conn is None
-    if conn is None:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError(
-                "写审计需要数据库：未设置 DATABASE_URL。"
-                "请先 `cp .env.example .env` 并 `docker compose up -d`。"
-            )
-        conn = psycopg.connect(
-            url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True
-        )
-
-    try:
+    with chain_write_transaction(conn, event.tenant_id):
         prev_hash = chain_tip(conn, event.tenant_id)
         values: list[object] = [
             event.tenant_id,
@@ -116,6 +106,41 @@ def write_audit_event(
             row = cur.fetchone()
         assert row is not None, "insert_statement_sql 应返回 (audit_id, record_seq, record_hash)"
         return str(row[0]), cast(int, row[1]), str(row[2])
+
+
+def write_audit_event(
+    event: AuditEvent,
+    *,
+    conn: psycopg.Connection[tuple[object, ...]] | None = None,
+) -> tuple[str, int, str]:
+    """写入一条审计事件（红线③：唯一走 ``insert_statement_sql()``）。
+
+    ``record_hash`` 由数据库算出（调用方不传）。``conn`` 缺省时按 ``DATABASE_URL``
+    自建连接（生产路径）；测试可注入真 PG 连接。返回
+    ``(audit_id, record_seq, record_hash)``。
+
+    **原子性**：取链尾与插入同事务、同租户串行；链尾被并发写入方抢占时
+    （唯一约束冲突）重读链尾重试一次，仍失败则异常上抛——**审计失败不得被吞**
+    （红线③：审计写入失败即阻断业务）。
+    """
+    # 局部 import：只有真正写库的路径才需要 DB 驱动（审计层其余部分零 DB 依赖）。
+    import psycopg
+
+    owns_connection = conn is None
+    connection = conn
+    if connection is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError(
+                "写审计需要数据库：未设置 DATABASE_URL。"
+                "请先 `cp .env.example .env` 并 `docker compose up -d`。"
+            )
+        # 非 autocommit：取链尾与插入必须落在同一事务内（autocommit 会把
+        # 「取链尾」与「插入」拆成两个事务 → 竞态窗口 → 断链）。
+        connection = psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1))
+
+    try:
+        return retry_on_chain_conflict(lambda: _insert_audit_row(connection, event))
     finally:
         if owns_connection:
-            conn.close()
+            connection.close()

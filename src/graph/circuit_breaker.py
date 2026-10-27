@@ -26,7 +26,14 @@
   - **每个候选都有明确结论**——放行 / 拒绝 / 显式未决（升级人工）三选一，
     未决候选留在队列并在结论里点名，绝不静默丢弃；
   - **队列结算按 (租户, 轨迹, 候选) 组合定位**——同一 candidate_id 出现在不同
-    trace 组时，一组被拒**不得**连带清掉另一组；
+    租户 / 不同 trace 组时，一组被拒**不得**连带清掉另一组；
+  - **结论按组保留（不得拍平成并集）**——熔断器是全局单例，队列里可能同时躺着
+    多个租户 / 多个任务组的候选；恢复结论必须**按 (租户, 轨迹) 分组**返回
+    （``ResumeOutcome.groups``），拍平成一个并集会让「恢复任务 B」把「任务 A」
+    的候选错误派发出去，并让审计行的租户 / 任务错位；
+  - **放行候选在真正派发前留在挂起队列**——只有派发结算（``before_dispatch``
+    的放行路径）才把候选从队列取出；这样别的任务组恢复时，本组候选既不会被
+    误派发，也不会被清出队列（候选绝不静默消失）；
   - **可发集合交回派发路径**——恢复后放行的候选进入待派发集合，由派发路径
     （``src/graph/workflow.py`` 的 ``resume_and_dispatch``）消费并真正发出；
     降级时熔断仍打开 → 候选**留在队列**（待恢复时再判），同时明确返回可发集合。
@@ -57,6 +64,7 @@ __all__ = [
     "DispatchPlan",
     "PendingAction",
     "RejudgeContext",
+    "RejudgeGroup",
     "ResumeOutcome",
     "TripEvent",
     "get_global_breaker",
@@ -141,14 +149,41 @@ class DispatchPlan:
 
 
 @dataclass(frozen=True)
+class RejudgeGroup:
+    """一个 **(租户, 轨迹)** 分组的重判结论（分组级结论，不可跨组混用）。
+
+    熔断器是**全局单例**，挂起队列里可能同时躺着多个租户 / 多个任务组的候选。
+    恢复时**按组重判**（判定输入不得跨组污染），结论也**按组保留**：
+
+    - ``sendable_candidate_ids``：本组放行集合——**只有本组**可以派发；
+    - ``denied``：本组被拒集合（携带 rule_id 与理由，红线②留痕）；
+    - ``undecided_candidate_ids``：本组未决候选（升级人工）——显式上报，
+      **留在挂起队列**，绝不静默丢弃。
+    """
+
+    tenant_id: uuid.UUID
+    trace_id: str
+    task_id: uuid.UUID | None = None
+    worker_id: uuid.UUID | None = None
+    sendable_candidate_ids: tuple[str, ...] = ()
+    denied: tuple[DeniedCandidate, ...] = ()
+    undecided_candidate_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ResumeOutcome:
     """恢复重判结论（ADR-030：以当前 rule_version 重判的结果）。
 
-    - ``sendable_candidate_ids``：重判**放行集合**——交回派发路径（消费者 =
-      ``src/graph/workflow.py`` 的派发逻辑，熔断感知）；
-    - ``denied``：被拒集合（携带 rule_id 与理由，红线②留痕）；
-    - ``undecided_candidate_ids``：规则**未给出结论**的候选（如冲突三键全平 →
-      升级人工）——显式上报，**绝不静默丢弃**；
+    **分组优先**：``groups`` 是**分组级**结论（每组 = 一个 (租户, 轨迹)），
+    是派发的**唯一**依据——跨组混用会把别的任务 / 别的租户的候选派发出去
+    （熔断器是全局单例，队列里可能同时躺着多个任务组的候选）。
+
+    下列扁平字段是**只读聚合视图**（各组并集），仅供展示与统计，
+    **不可直接用于派发**：
+
+    - ``sendable_candidate_ids``：各组放行集合的并集（聚合视图）；
+    - ``denied``：各组被拒集合的并集（聚合视图）；
+    - ``undecided_candidate_ids``：各组未决集合的并集（聚合视图）；
     - ``rejudged_candidate_count``：本次重判覆盖的候选数（去重后）。
     """
 
@@ -158,6 +193,18 @@ class ResumeOutcome:
     rejudged_candidate_count: int
     elapsed_ms: float
     undecided_candidate_ids: tuple[str, ...] = ()
+    groups: tuple[RejudgeGroup, ...] = ()
+
+    def group_for(self, *, tenant_id: uuid.UUID, trace_id: str) -> RejudgeGroup | None:
+        """取指定 ``(租户, 轨迹)`` 组的结论（该组不存在则 ``None``）。
+
+        派发路径用它把「全局重判结论」收敛到**当前任务所属的那一组**——
+        别的组既不派发也不丢弃（留在熔断挂起队列）。
+        """
+        for group in self.groups:
+            if group.tenant_id == tenant_id and group.trace_id == trace_id:
+                return group
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +328,9 @@ class CircuitBreaker:
         self._monotonic = monotonic if monotonic is not None else time.perf_counter
         self._open = False
         self._pending: list[PendingAction] = []
-        self._ready: list[str] = []
+        # 待派发集合按 **(租户, 轨迹, 候选)** 三元组存放——扁平候选 id 列表会让
+        # 同名候选在别的租户 / 别的轨迹组被误删或误加（跨组串味）。
+        self._ready: list[tuple[uuid.UUID, str, str]] = []
         self._trip: TripEvent | None = None
         self._trip_tenant: uuid.UUID | None = None
         self._dispatch_stop_elapsed_ms: float | None = None
@@ -307,9 +356,22 @@ class CircuitBreaker:
     def ready_candidate_ids(self) -> tuple[str, ...]:
         """已重判放行、**等待派发**的候选（顺序 = 重判结论顺序）。
 
+        **聚合视图**：按 (租户, 轨迹, 候选) 去重后的候选 id 并集——同名候选出现在
+        不同租户 / 不同轨迹时只算一个。派发必须按**三元组**定位（见
+        ``ready_entries``），**不得**拿本视图做派发匹配。
+
         恢复（``reset``）把放行集合交回派发路径：交回之前它们既不在挂起队列里
         （已判完），也还没发出去——本集合就是这段窗口的**显式落点**，杜绝
         「重判出可发集合却无人派发 = 候选静默消失」。
+        """
+        return tuple(_distinct(candidate_id for _, _, candidate_id in self._ready))
+
+    @property
+    def ready_entries(self) -> tuple[tuple[uuid.UUID, str, str], ...]:
+        """待派发集合的**分组级**条目：``(租户, 轨迹, 候选)`` 三元组。
+
+        派发结算（``_settle_dispatched``）按本三元组定位——同名候选在别的租户 /
+        别的轨迹组里时，本次派发**不牵连**它。
         """
         return tuple(self._ready)
 
@@ -407,6 +469,17 @@ class CircuitBreaker:
 
     # -- 派发前检查 -------------------------------------------------------
 
+    def resolve_tenant(self, tenant_id: uuid.UUID | None) -> uuid.UUID:
+        """派发 / 分组口径的**租户解析**（与 ``before_dispatch`` 同一口径）。
+
+        缺省取「熔断触发时的租户」——同一开关下的动作落在同一条审计链上；
+        未触发过则取实例默认租户。
+
+        调用方（如派发路径）必须用**同一口径**解析租户，否则分组匹配不上——
+        会把「本组无候选」误判成「别的组有候选」，进而跨组误派发。
+        """
+        return tenant_id if tenant_id is not None else (self._trip_tenant or self._default_tenant)
+
     def before_dispatch(
         self,
         *,
@@ -428,10 +501,10 @@ class CircuitBreaker:
         """
         moment = _as_aware(now if now is not None else self._clock())
         # 租户缺省取「熔断触发时的租户」——同一开关下的动作落在同一条审计链上。
-        tenant = tenant_id if tenant_id is not None else (self._trip_tenant or self._default_tenant)
+        tenant = self.resolve_tenant(tenant_id)
         batch_trace = trace_id or f"circuit-breaker-{tenant}"
         if not self._open:
-            self._settle_dispatched(candidate_ids, trace_id=batch_trace)
+            self._settle_dispatched(candidate_ids, tenant_id=tenant, trace_id=batch_trace)
             return DispatchPlan(allowed=True)
 
         snapshot = context if context is not None else RejudgeContext()
@@ -482,9 +555,14 @@ class CircuitBreaker:
         关键落点：``config`` 在**恢复时刻**加载（不是挂起时的快照）——挂起期间
         的策略变更（收紧频控等）在恢复时立即生效；重判结论写审计（红线③）。
 
-        放行集合**交回派发路径**：结论里的 ``sendable_candidate_ids`` 即待派发集合
-        （``ready_candidate_ids``），由派发路径消费（``src/graph/workflow.py``）；
-        尚未被派发前它们既不在挂起队列（已判完）也没发出去——本方法不丢候选。
+        结论**按组返回**（``outcome.groups``）：熔断器是全局单例，队列里可能同时
+        躺着多个租户 / 多个任务组的候选；派发路径只消费**自己那组**的放行集合
+        （``src/graph/workflow.py`` 的 ``_dispatch_rejudged``），别的组候选留在
+        挂起队列等待各自的任务恢复——本方法不丢候选、也不跨组串味。
+
+        放行集合**交回派发路径**：本组放行候选进入待派发集合
+        （``ready_candidate_ids``），由派发路径消费；尚未被派发前它们仍留在挂起
+        队列里——本方法不丢候选。
         """
         moment = _as_aware(now if now is not None else self._clock())
         config = self._load_config()
@@ -494,7 +572,7 @@ class CircuitBreaker:
             reason=reason,
             actor=actor,
             action_type=ACTION_CIRCUIT_RESUME,
-            retain_sendable=False,
+            record_ready=True,
         )
         self._open = False
         return outcome
@@ -514,7 +592,7 @@ class CircuitBreaker:
 
         **队列不丢**：熔断仍打开 → 此刻**不可派发** → 重判放行的候选**留在挂起
         队列**（待熔断恢复时按当时策略再判一次，ADR-030 语义一致），
-        同时在结论的 ``sendable_candidate_ids`` 里**明确返回**可发集合。
+        同时在结论的**分组**放行集合里**明确返回**可发集合。
         """
         moment = _as_aware(now if now is not None else self._clock())
         config = self._load_config()
@@ -524,7 +602,7 @@ class CircuitBreaker:
             reason=reason,
             actor=actor,
             action_type=ACTION_AUTONOMY_DOWNGRADE,
-            retain_sendable=True,
+            record_ready=False,
         )
 
     # -- 内部 -------------------------------------------------------------
@@ -543,34 +621,40 @@ class CircuitBreaker:
         reason: str,
         actor: str,
         action_type: str,
-        retain_sendable: bool,
+        record_ready: bool,
     ) -> ResumeOutcome:
         """挂起队列重判 + 审计（唯一实现点 = ``gate.rejudge_with_current_config``）。
 
         按（租户, 轨迹）分组重判，避免不同批次的输入互相污染；组内判定输入
         **按主键去重**装配（同一批次上下文不得按候选数量重复计入）。
 
+        **结论按组保留**（``ResumeOutcome.groups``）——熔断器是全局单例，队列里
+        可能同时躺着多个租户 / 多个任务组的候选；拍平成一个并集会让「恢复任务 B」
+        把「任务 A」的候选错误派发出去，并让审计行的租户 / 任务错位。
+
         **队列结算**（候选绝不静默消失）：
 
         - 被规则拒绝的候选 → 出队（终态，留痕在 ``denied``）；
-        - 重判放行的候选 → ``retain_sendable=False``（恢复）时出队并进入**待派发
-          集合**（交回派发路径）；``retain_sendable=True``（降级，熔断仍打开）
-          时**留在队列**（此刻不可派发），同时在结论里明确返回可发集合；
+        - 重判放行的候选 → **留在挂起队列**，直到**真正派发**时由
+          ``before_dispatch`` 的派发结算出队——这样别的任务组恢复时，本组候选
+          既不会被误派发，也不会被清出队列（跨组不串味、不丢候选）；
         - 规则未给出结论的候选（升级人工）→ **留在队列**并在
           ``undecided_candidate_ids`` 中显式上报。
+
+        ``record_ready=True``（恢复路径）：放行候选登记进**待派发集合**
+        （``_ready``），交回派发路径消费；``record_ready=False``（降级路径，熔断
+        仍打开）：放行候选只在结论里明确返回，**不**登记待派发集合（此刻不可派发）。
+        两条路径的放行候选都**留在挂起队列**，直到真正派发才出队。
         """
         groups: dict[tuple[uuid.UUID, str], list[PendingAction]] = {}
         for action in self._pending:
             groups.setdefault((action.tenant_id, action.trace_id), []).append(action)
 
         started = self._monotonic()
-        sendable: list[str] = []
-        denied: list[DeniedCandidate] = []
-        undecided: list[str] = []
         # 队列结算键 = **(租户, 轨迹, 候选)** 组合——同一 candidate_id 出现在不同
-        # trace 组时，一组被拒**不得**连带清掉另一组（否则候选静默消失）。
-        concluded: set[tuple[uuid.UUID, str, str]] = set()
+        # 租户 / 不同 trace 组时，一组被拒**不得**连带清掉另一组（否则候选静默消失）。
         denied_keys: set[tuple[uuid.UUID, str, str]] = set()
+        group_results: list[RejudgeGroup] = []
         rejudged_count = 0
 
         for (tenant_id, trace_id), actions in groups.items():
@@ -594,13 +678,19 @@ class CircuitBreaker:
                 for candidate_id in candidate_ids
                 if candidate_id not in set(group_sendable) and candidate_id not in denied_ids
             ]
-            sendable.extend(group_sendable)
-            denied.extend(group_denied)
-            undecided.extend(group_undecided)
-            concluded.update((tenant_id, trace_id, cid) for cid in group_sendable)
-            concluded.update((tenant_id, trace_id, cid) for cid in denied_ids)
             denied_keys.update((tenant_id, trace_id, cid) for cid in denied_ids)
             rejudged_count += len(candidate_ids)
+            group_results.append(
+                RejudgeGroup(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    task_id=_first_uuid(item.task_id for item in actions),
+                    worker_id=_first_uuid(item.worker_id for item in actions),
+                    sendable_candidate_ids=tuple(group_sendable),
+                    denied=tuple(group_denied),
+                    undecided_candidate_ids=tuple(group_undecided),
+                )
+            )
             self._write_rejudge_audit(
                 RejudgeAudit(
                     tenant_id=tenant_id,
@@ -619,95 +709,171 @@ class CircuitBreaker:
 
         elapsed_ms = (self._monotonic() - started) * 1000.0
 
-        all_actions = [item for actions in groups.values() for item in actions]
-
-        first_key = next(iter(groups), None)
-        tenant = (
-            first_key[0] if first_key is not None else (self._trip_tenant or self._default_tenant)
-        )
-        trace = first_key[1] if first_key is not None else ""
+        # 收尾事件**按组各写一条**（红线③）：每条用**自己组**的 tenant_id /
+        # trace_id / task_id / worker_id / hit_rule_ids（只含本组 denied）——
+        # 合并成一条会让审计行的租户与任务错位（审计必须能反查到正确的租户与
+        # 任务）；其余组若无收尾事件，就只剩通用的 gate_rejudge 行，恢复动作
+        # 本身不可反查。
         # 收尾事件先写：写失败 → 异常上抛 → **队列原样保留**（熔断仍打开，
         # 下次恢复会按当时策略把这些候选重新判定一次，候选不丢）。
-        self._write_event(
-            AuditEvent(
-                tenant_id=tenant,
-                trace_id=trace or f"circuit-breaker-{tenant}",
-                # 恢复事件的 task_id / worker_id **透传**挂起队列里的真实值
-                # （审计必须能反查到具体任务与数字员工）。
-                task_id=_first_uuid(item.task_id for item in all_actions),
-                worker_id=_first_uuid(item.worker_id for item in all_actions),
-                action_type=action_type,
-                rule_version=config.version,
-                actor_type="system",
-                actor_id="circuit-breaker",
-                actor_role="system",
-                hit_rule_ids=tuple(str(item.rule_id) for item in denied),
-                input_snapshot={"rejudged_candidate_count": rejudged_count},
-                evidence={
-                    "adr": "ADR-030",
-                    "scope": "resume-rejudge",
-                    "measure": "rejudge-elapsed",
-                    "dispatch_stop_elapsed_ms": self._dispatch_stop_elapsed_ms,
-                    "reason": reason,
-                    "actor": actor,
-                    "elapsed_ms": elapsed_ms,
-                },
-                payload={
-                    "sendable_candidate_ids": list(sendable),
-                    "denied_candidate_ids": [item.candidate_id for item in denied],
-                    "undecided_candidate_ids": list(undecided),
-                },
+        if group_results:
+            for group in group_results:
+                self._write_event(
+                    self._build_resume_event(
+                        config=config,
+                        action_type=action_type,
+                        reason=reason,
+                        actor=actor,
+                        elapsed_ms=elapsed_ms,
+                        rejudged_count=rejudged_count,
+                        tenant_id=group.tenant_id,
+                        trace_id=group.trace_id,
+                        task_id=group.task_id,
+                        worker_id=group.worker_id,
+                        denied=group.denied,
+                        sendable=group.sendable_candidate_ids,
+                        undecided=group.undecided_candidate_ids,
+                    )
+                )
+        else:
+            # 队列为空时也要留下「恢复动作发生过」的痕迹（否则恢复不可反查）。
+            tenant = self._trip_tenant or self._default_tenant
+            self._write_event(
+                self._build_resume_event(
+                    config=config,
+                    action_type=action_type,
+                    reason=reason,
+                    actor=actor,
+                    elapsed_ms=elapsed_ms,
+                    rejudged_count=0,
+                    tenant_id=tenant,
+                    trace_id=f"circuit-breaker-{tenant}",
+                    task_id=None,
+                    worker_id=None,
+                    denied=(),
+                    sendable=(),
+                    undecided=(),
+                )
             )
-        )
 
         # 队列结算（见方法说明）：**收尾事件审计写成功之后**才动队列——
         # 审计写失败时异常上抛、队列原样保留（候选不丢，下次恢复重判）。
         # 结算按 **(租户, 轨迹, 候选)** 组合定位，不跨组连带清理。
-        if retain_sendable:
-            self._pending = [
-                item
-                for item in self._pending
-                if (item.tenant_id, item.trace_id, item.candidate_id) not in denied_keys
-            ]
-        else:
-            self._pending = [
-                item
-                for item in self._pending
-                if (item.tenant_id, item.trace_id, item.candidate_id) not in concluded
-            ]
-            for candidate_id in sendable:
-                if candidate_id not in self._ready:
-                    self._ready.append(candidate_id)
+        # **放行候选留在队列**——只有真正派发（``before_dispatch`` 的派发结算）
+        # 才出队；否则别的任务组恢复时会把本组候选一并「结算」掉（跨组静默消失）。
+        self._pending = [
+            item
+            for item in self._pending
+            if (item.tenant_id, item.trace_id, item.candidate_id) not in denied_keys
+        ]
+        if record_ready:
+            for group in group_results:
+                for candidate_id in group.sendable_candidate_ids:
+                    key = (group.tenant_id, group.trace_id, candidate_id)
+                    if key not in self._ready:
+                        self._ready.append(key)
 
         return ResumeOutcome(
             rule_version=config.version,
-            sendable_candidate_ids=tuple(sendable),
-            denied=tuple(denied),
+            sendable_candidate_ids=tuple(
+                candidate_id
+                for group in group_results
+                for candidate_id in group.sendable_candidate_ids
+            ),
+            denied=tuple(item for group in group_results for item in group.denied),
             rejudged_candidate_count=rejudged_count,
             elapsed_ms=elapsed_ms,
-            undecided_candidate_ids=tuple(undecided),
+            undecided_candidate_ids=tuple(
+                candidate_id
+                for group in group_results
+                for candidate_id in group.undecided_candidate_ids
+            ),
+            groups=tuple(group_results),
         )
 
-    def _settle_dispatched(self, candidate_ids: Sequence[str], *, trace_id: str = "") -> None:
+    def _build_resume_event(
+        self,
+        *,
+        config: GovernanceConfig,
+        action_type: str,
+        reason: str,
+        actor: str,
+        elapsed_ms: float,
+        rejudged_count: int,
+        tenant_id: uuid.UUID,
+        trace_id: str,
+        task_id: uuid.UUID | None,
+        worker_id: uuid.UUID | None,
+        denied: Sequence[DeniedCandidate],
+        sendable: Sequence[str],
+        undecided: Sequence[str],
+    ) -> AuditEvent:
+        """装配**一条**恢复 / 降级收尾审计事件（按组调用，字段全部来自本组）。"""
+        return AuditEvent(
+            tenant_id=tenant_id,
+            trace_id=trace_id or f"circuit-breaker-{tenant_id}",
+            # 恢复事件的 task_id / worker_id **透传**本组挂起队列里的真实值
+            # （审计必须能反查到具体任务与数字员工）。
+            task_id=task_id,
+            worker_id=worker_id,
+            action_type=action_type,
+            rule_version=config.version,
+            actor_type="system",
+            actor_id="circuit-breaker",
+            actor_role="system",
+            hit_rule_ids=tuple(str(item.rule_id) for item in denied),
+            input_snapshot={"rejudged_candidate_count": rejudged_count},
+            evidence={
+                "adr": "ADR-030",
+                "scope": "resume-rejudge",
+                "measure": "rejudge-elapsed",
+                "dispatch_stop_elapsed_ms": self._dispatch_stop_elapsed_ms,
+                "reason": reason,
+                "actor": actor,
+                "elapsed_ms": elapsed_ms,
+            },
+            payload={
+                "sendable_candidate_ids": list(sendable),
+                "denied_candidate_ids": [item.candidate_id for item in denied],
+                "undecided_candidate_ids": list(undecided),
+            },
+        )
+
+    def _settle_dispatched(
+        self,
+        candidate_ids: Sequence[str],
+        *,
+        tenant_id: uuid.UUID,
+        trace_id: str = "",
+    ) -> None:
         """派发结算：本次真正派发的候选从挂起队列与待派发集合中出队。
 
         派发即终结——候选不该继续挂在「待重判 / 待派发」集合里。
 
-        挂起队列按 **(轨迹, 候选)** 组合出队：同一 candidate_id 在别的轨迹组里
-        排着时，本次派发不牵连它（否则那条候选**静默消失**）。
+        **匹配键 = (租户, 轨迹, 候选)** 三元组：同一 candidate_id 出现在别的租户 /
+        别的轨迹组里时，本次派发**不牵连**它（否则那条候选**静默消失**——既不放行
+        也无留痕，且后续也上报不到它）。
+
+        轨迹缺省时按 **(租户, 候选)** 精确匹配——**不得**退化成「只按 candidate_id
+        全表删除」（那会把别的租户 / 别的任务的同名候选一并清掉）。
         """
         ids = {str(candidate_id) for candidate_id in candidate_ids}
         if not ids:
             return
-        if trace_id:
-            self._pending = [
-                item
-                for item in self._pending
-                if not (item.candidate_id in ids and item.trace_id == trace_id)
-            ]
-        else:
-            self._pending = [item for item in self._pending if item.candidate_id not in ids]
-        self._ready = [candidate_id for candidate_id in self._ready if candidate_id not in ids]
+
+        def _matches_pending(item: PendingAction) -> bool:
+            if item.tenant_id != tenant_id or item.candidate_id not in ids:
+                return False
+            return not trace_id or item.trace_id == trace_id
+
+        def _matches_ready(entry: tuple[uuid.UUID, str, str]) -> bool:
+            entry_tenant, entry_trace, entry_candidate = entry
+            if entry_tenant != tenant_id or entry_candidate not in ids:
+                return False
+            return not trace_id or entry_trace == trace_id
+
+        self._pending = [item for item in self._pending if not _matches_pending(item)]
+        self._ready = [entry for entry in self._ready if not _matches_ready(entry)]
 
     def _write_event(self, record: AuditEvent) -> None:
         """写熔断事件审计（红线③：默认走 ``insert_statement_sql``）。"""

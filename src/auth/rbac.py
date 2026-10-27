@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from src.audit.chain import chain_tip
+from src.audit.chain import chain_tip, chain_write_transaction, retry_on_chain_conflict
 from src.audit.hash_chain import insert_statement_sql
 from src.auth.roles import PERMISSION_MATRIX, Access, Permission, Role
 from src.policy_kernel.kernel import Decision, RuleId
@@ -158,47 +158,56 @@ def record_denial(
 
     ``record_hash`` 由数据库按同一口径算出（调用方不传）。返回 ``(audit_id, record_seq,
     record_hash)``。这是**显式 IO 函数**，不被纯判定 ``check_permission`` 调用。
+
+    **原子性**（红线③）：取链尾与插入在**同一事务**内、同租户串行（与
+    ``src/audit/events.py`` 等写入方同一口径，见 ``src/audit/chain.py``）。
+    否则并发写入会读到同一链尾 → 两条记录挂同一 ``prev_hash`` → 哈希链断裂。
     """
     # 局部 import：仅 IO 路径需要 psycopg 的 Jsonb 包装；纯判定路径不拉 psycopg。
     from psycopg.types.json import Jsonb
 
-    prev_hash = chain_tip(conn, tenant_id)
-    hit_rule_ids = [check.rule_id] if check.rule_id else []
+    def _insert() -> tuple[str, int, str]:
+        with chain_write_transaction(conn, tenant_id):
+            prev_hash = chain_tip(conn, tenant_id)
+            hit_rule_ids = [check.rule_id] if check.rule_id else []
 
-    # HASHED_FIELDS 顺序（见 hash_chain.HASHED_FIELDS）+ prev_hash。
-    values: list[object] = [
-        tenant_id,
-        trace_id,
-        task_id,
-        worker_id,
-        decision_id,
-        approval_id,
-        "user",  # actor_type：越权多为人类角色发起
-        actor_id,
-        role.value,  # actor_role
-        action.value,  # action_type
-        "permission",  # object_type
-        object_id or str(uuid.uuid4()),
-        hit_rule_ids,
-        "n/a",  # model_version：RBAC 拒绝不涉及模型判定
-        "n/a",  # prompt_version
-        "n/a",  # skill_version
-        "n/a",  # rule_version
-        Jsonb({"role": role.value, "action": action.value}),  # input_snapshot
-        Jsonb({"reason": check.reason}),  # evidence
-        Jsonb(  # payload：结论 + 错误码 + rule 标识
-            {
-                "decision": check.conclusion.value,
-                "error_code": check.error_code,
-                "rule_id": check.rule_id,
-            }
-        ),
-        "sha256",  # hash_algo
-        prev_hash,
-    ]
+            # HASHED_FIELDS 顺序（见 hash_chain.HASHED_FIELDS）+ prev_hash。
+            values: list[object] = [
+                tenant_id,
+                trace_id,
+                task_id,
+                worker_id,
+                decision_id,
+                approval_id,
+                "user",  # actor_type：越权多为人类角色发起
+                actor_id,
+                role.value,  # actor_role
+                action.value,  # action_type
+                "permission",  # object_type
+                object_id or str(uuid.uuid4()),
+                hit_rule_ids,
+                "n/a",  # model_version：RBAC 拒绝不涉及模型判定
+                "n/a",  # prompt_version
+                "n/a",  # skill_version
+                "n/a",  # rule_version
+                Jsonb({"role": role.value, "action": action.value}),  # input_snapshot
+                Jsonb({"reason": check.reason}),  # evidence
+                Jsonb(  # payload：结论 + 错误码 + rule 标识
+                    {
+                        "decision": check.conclusion.value,
+                        "error_code": check.error_code,
+                        "rule_id": check.rule_id,
+                    }
+                ),
+                "sha256",  # hash_algo
+                prev_hash,
+            ]
 
-    with conn.cursor() as cur:
-        cur.execute(insert_statement_sql(), values)
-        row = cur.fetchone()
-    assert row is not None, "insert_statement_sql 应返回 (audit_id, record_seq, record_hash)"
-    return str(row[0]), cast(int, row[1]), str(row[2])
+            with conn.cursor() as cur:
+                cur.execute(insert_statement_sql(), values)
+                row = cur.fetchone()
+        assert row is not None, "insert_statement_sql 应返回 (audit_id, record_seq, record_hash)"
+        return str(row[0]), cast(int, row[1]), str(row[2])
+
+    # 链尾被并发写入方抢占（唯一约束冲突）→ 重读链尾重试一次；再失败则异常上抛。
+    return retry_on_chain_conflict(_insert)

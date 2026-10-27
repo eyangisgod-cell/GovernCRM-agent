@@ -11,6 +11,8 @@
 -- 纪律（沿用 001 头注释）：
 --   1) 幂等：重复执行不报错（CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS）。
 --   2) 单一写者：Wave 3 唯一迁移 = T-E7 的 task_checkpoint（**只此一个 003**）。
+--      ⚠️ 偏离登记：另增 004_audit_log_chain_unique（审计链 DB 级不变量），
+--      理由：链结构不变量须落 DB 层，且 001 已应用不可改。
 --   3) 租户隔离：业务表带 tenant_id，索引以 tenant_id 打头。
 --   4) 本表**非** audit_log，不挂 append-only 触发器；只增不改是约定
 --      （接口只提供写入+查询，不提供 UPDATE/DELETE API）。

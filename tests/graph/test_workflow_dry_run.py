@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,10 +42,13 @@ def test_cli_dry_run_exits_zero_and_prints_full_node_sequence() -> None:
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
-        # 显式指定编码：子进程在 ``PYTHONIOENCODING=utf-8`` 环境下输出 UTF-8，
-        # 而父进程默认按本地代码页解码 → 解码失败导致 stdout 变 None（Windows 必现）。
+        # 编码口径必须**两端一致**，否则中文断言在非 UTF-8 平台上必失败：
+        # 子进程 stdout 默认走本地代码页（Windows = GBK），父进程若按 UTF-8 解码，
+        # 中文会被解成替换符。故显式给子进程注入 ``PYTHONIOENCODING=utf-8``，
+        # 并让父进程同样按 UTF-8 解码 —— 不依赖执行环境的本地代码页。
         encoding="utf-8",
         errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         timeout=120,
         check=False,
     )

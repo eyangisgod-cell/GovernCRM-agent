@@ -7,6 +7,9 @@
   ``record_hash`` 由数据库按同一口径算出（调用方不传）。
 - **ADR-030**（架构 v5.2:238）：恢复重判结论必须写审计；
   ``rule_version`` = 重判时**当前** governance config 版本（非挂起时快照）。
+
+**原子性（红线③：哈希链不可断）**：取链尾与插入落在**同一事务**内，且同租户写入
+经 ``pg_advisory_xact_lock`` 串行（``src/audit/chain.py`` 是唯一实现点）。
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from src.audit.chain import chain_tip
+from src.audit.chain import chain_tip, chain_write_transaction, retry_on_chain_conflict
 from src.audit.hash_chain import insert_statement_sql
 
 if TYPE_CHECKING:
@@ -51,35 +54,15 @@ class RejudgeAudit:
     signers: tuple[str, ...]
 
 
-def write_rejudge_audit(
-    record: RejudgeAudit,
-    *,
-    conn: psycopg.Connection[tuple[object, ...]] | None = None,
+def _insert_rejudge_row(
+    conn: psycopg.Connection[tuple[object, ...]], record: RejudgeAudit
 ) -> tuple[str, int, str]:
-    """写入一条「恢复重判」审计记录（红线③：唯一走 ``insert_statement_sql``）。
-
-    ``record_hash`` 由数据库算出（调用方不传）。``conn`` 缺省时按 ``DATABASE_URL``
-    自建连接（graph 生产路径）；测试可注入真 PG 连接。返回 ``(audit_id, record_seq,
-    record_hash)``。
-    """
-    # 局部 import：仅 IO 路径需要 psycopg 驱动与 Jsonb 包装
+    """在**同一事务**内「取链尾 → 插入」一条恢复重判审计（红线③：哈希链不可断）。"""
+    # 局部 import：仅 IO 路径需要 Jsonb 包装
     # （模块级零 DB 依赖——``import src.graph.workflow`` 不加载 psycopg）。
-    import psycopg
     from psycopg.types.json import Jsonb
 
-    owns_connection = conn is None
-    if conn is None:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError(
-                "写恢复重判审计需要数据库：未设置 DATABASE_URL。"
-                "请先 `cp .env.example .env` 并 `docker compose up -d`。"
-            )
-        conn = psycopg.connect(
-            url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True
-        )
-
-    try:
+    with chain_write_transaction(conn, record.tenant_id):
         prev_hash = chain_tip(conn, record.tenant_id)
         hit_rule_ids = [denied.rule_id for denied in record.denied]
         input_snapshot = {
@@ -137,6 +120,41 @@ def write_rejudge_audit(
             row = cur.fetchone()
         assert row is not None, "insert_statement_sql 应返回 (audit_id, record_seq, record_hash)"
         return str(row[0]), cast(int, row[1]), str(row[2])
+
+
+def write_rejudge_audit(
+    record: RejudgeAudit,
+    *,
+    conn: psycopg.Connection[tuple[object, ...]] | None = None,
+) -> tuple[str, int, str]:
+    """写入一条「恢复重判」审计记录（红线③：唯一走 ``insert_statement_sql``）。
+
+    ``record_hash`` 由数据库算出（调用方不传）。``conn`` 缺省时按 ``DATABASE_URL``
+    自建连接（graph 生产路径）；测试可注入真 PG 连接。返回 ``(audit_id, record_seq,
+    record_hash)``。
+
+    **原子性**：取链尾与插入同事务、同租户串行；链尾被并发写入方抢占时重试一次，
+    仍失败则异常上抛（审计失败不得被吞，红线③）。
+    """
+    # 局部 import：仅 IO 路径需要 psycopg 驱动
+    # （模块级零 DB 依赖——``import src.graph.workflow`` 不加载 psycopg）。
+    import psycopg
+
+    owns_connection = conn is None
+    connection = conn
+    if connection is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError(
+                "写恢复重判审计需要数据库：未设置 DATABASE_URL。"
+                "请先 `cp .env.example .env` 并 `docker compose up -d`。"
+            )
+        # 非 autocommit：取链尾与插入必须落在同一事务内（autocommit 会把
+        # 「取链尾」与「插入」拆成两个事务 → 竞态窗口 → 断链）。
+        connection = psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1))
+
+    try:
+        return retry_on_chain_conflict(lambda: _insert_rejudge_row(connection, record))
     finally:
         if owns_connection:
-            conn.close()
+            connection.close()

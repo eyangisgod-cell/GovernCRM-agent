@@ -9,6 +9,9 @@
 - **架构 v5.2:612 / 裁决 #8**：REQUIRE_APPROVAL → LangGraph ``interrupt()`` 挂起 →
   人工 → ``Command(resume=...)`` 恢复；任务级批量审批 = 一次 resume 覆盖该批全部候选。
 - **E9 / 裁决 #25**：审批 48h 超时 = 过期，**不默认通过**——超时后 resume 不放行。
+  **时间源信任模型**：过期判定只认**服务端墙钟**（挂起时刻 + 恢复时刻）；
+  客户端自带的 ``resumed_at`` **不受信任**，仅作参考记录，不得参与判定
+  （客户端可回填过去时刻 / 伪造未来时刻绕过超时）。
 - **红线③**：审计 append-only + 哈希链；写审计唯一入口 = ``insert_statement_sql()``，
   ``record_hash`` 由 DB 算。
 - **ADR-035**：confirm_plan 位置与必经语义不动（由 T-E1 回归用例保障）。
@@ -49,6 +52,27 @@ _NOW = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
 
 #: E9 / 裁决 #25：审批超时 48h（取 governance.yaml 种子值）。
 _TIMEOUT_HOURS = 48
+
+#: 服务端墙钟的基准读数（与 state["now"] 刻意不同——用于验证挂起时刻取的是墙钟）。
+_WALL_CLOCK = datetime(2026, 10, 27, 9, 30, tzinfo=UTC)
+
+
+class _FakeClock:
+    """可注入的服务端墙钟（测试缝）：直接推进时间，**不依赖真实 sleep**。
+
+    E9 的过期判定只认服务端墙钟；测试通过 monkeypatch ``gate._utc_now``
+    把「真实经过的时间」变成确定性的读数。
+    """
+
+    def __init__(self, start: datetime) -> None:
+        self.current = start
+
+    def __call__(self) -> datetime:
+        return self.current
+
+    def advance_hours(self, hours: float) -> None:
+        """把服务端墙钟往前拨（等价于真实经过 N 小时）。"""
+        self.current = self.current + timedelta(hours=hours)
 
 
 def _base_config() -> GovernanceConfig:
@@ -280,30 +304,181 @@ def test_require_approval_interrupts_then_resume_reevaluates_with_current_config
     assert any(d.rule_id == "FREQ_GLOBAL_7D" for d in audit_record.denied)
 
 
-def test_resume_after_48h_is_expired_and_not_approved(
+def test_expired_approval_is_not_approved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """E9 负向（先红）：挂起后超过 48h 才 resume → 审批过期，**不默认通过**，批次不放行。"""
+    """E9 负向（先红）：挂起后真实经过 > 48h 才 resume → 审批过期，**不默认通过**。
+
+    时间推进用**注入的服务端墙钟**（不 sleep）：过期判定必须以服务端真实墙钟为基准，
+    不能用客户端自带的时刻，也不能用 state 里那个任务起始时刻的陈旧 ``now``。
+    """
     audit_calls: list[RejudgeAudit] = []
     monkeypatch.setattr(
         gate,
         "write_rejudge_audit",
         lambda record: _record_audit_call(audit_calls, record),
     )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
     graph = workflow.build_graph(checkpointer=MemorySaver())
     thread = _thread_config()
 
     suspended = graph.invoke(_approval_state(), thread)
     assert "__interrupt__" in suspended
 
-    late_resume_at = _NOW + timedelta(hours=_TIMEOUT_HOURS + 1)
-    final = graph.invoke(Command(resume={"approved": True, "resumed_at": late_resume_at}), thread)
+    # 真实经过 48h + 1h（服务端墙钟推进）
+    clock.advance_hours(_TIMEOUT_HOURS + 1)
+    final = graph.invoke(Command(resume={"approved": True}), thread)
 
     assert final["approval_status"] == "approval-expired", "E9：48h 后 resume = 过期"
     assert final["sendable_candidate_ids"] == [], "过期审批不得默认通过、不得放行"
     assert final.get("sent", []) == []
     assert audit_calls
     assert audit_calls[0].approval_status == "approval-expired"
+
+
+def test_client_supplied_resumed_at_cannot_bypass_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E9 负向（先红）：客户端带**过去的** ``resumed_at`` 伪造未超时 → 仍判过期。
+
+    这是旧实现的核心漏洞：过期判定直接采信客户端时刻，真实过了 100h 也判
+    ``expired=False``——E9 形同虚设。客户端时刻**只作参考记录**，不参与判定。
+    """
+    monkeypatch.setattr(
+        gate,
+        "write_rejudge_audit",
+        lambda record: ("audit-1", 1, "0" * 64),
+    )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
+    graph = workflow.build_graph(checkpointer=MemorySaver())
+    thread = _thread_config()
+
+    graph.invoke(_approval_state(), thread)
+    clock.advance_hours(_TIMEOUT_HOURS + 52)  # 真实已过 100h
+    # 客户端回填一个「刚刚才提交」的过去时刻，企图伪装成未超时
+    forged_resumed_at = _NOW + timedelta(minutes=5)
+    final = graph.invoke(
+        Command(resume={"approved": True, "resumed_at": forged_resumed_at}),
+        thread,
+    )
+
+    assert final["approval_status"] == "approval-expired", (
+        "客户端自带的过去时刻不得绕过 48h 超时（E9 形同虚设）"
+    )
+    assert final["sendable_candidate_ids"] == []
+    assert final.get("sent", []) == []
+
+
+def test_client_supplied_future_resumed_at_cannot_extend_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E9 负向（先红）：客户端带**未来的** ``resumed_at`` 不得延长超时窗口。
+
+    钳制到 ``min(client, server_now)`` 也挡不住这一路——未来时刻会把
+    ``submitted_at + timeout`` 推后，从而让已过期审批复活。
+    """
+    monkeypatch.setattr(
+        gate,
+        "write_rejudge_audit",
+        lambda record: ("audit-1", 1, "0" * 64),
+    )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
+    graph = workflow.build_graph(checkpointer=MemorySaver())
+    thread = _thread_config()
+
+    graph.invoke(_approval_state(), thread)
+    clock.advance_hours(_TIMEOUT_HOURS + 1)
+    future_resumed_at = _WALL_CLOCK + timedelta(days=365)
+    final = graph.invoke(
+        Command(resume={"approved": True, "resumed_at": future_resumed_at}),
+        thread,
+    )
+
+    assert final["approval_status"] == "approval-expired", (
+        "客户端自带的未来时刻不得延长超时窗口、不得让过期审批复活"
+    )
+    assert final["sendable_candidate_ids"] == []
+    assert final.get("sent", []) == []
+
+
+def test_approval_within_window_is_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E9 正向（防修复过头）：窗口内 resume → 正常批准并走**当前** config 重判。"""
+    monkeypatch.setattr(
+        gate,
+        "write_rejudge_audit",
+        lambda record: ("audit-1", 1, "0" * 64),
+    )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
+    graph = workflow.build_graph(checkpointer=MemorySaver())
+    thread = _thread_config()
+
+    graph.invoke(_approval_state(), thread)
+    clock.advance_hours(1)  # 远在 48h 窗口内
+    final = graph.invoke(Command(resume={"approved": True}), thread)
+
+    assert final["approval_status"] == "resumed-approved", "窗口内的批准不得被误判为过期"
+    assert final["sendable_candidate_ids"] == ["CAND-1"], "窗口内批准 → 按当前 config 重判后放行"
+
+
+def test_suspend_payload_records_server_wall_clock_not_state_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """挂起载荷里的 ``submitted_at`` 必须是**服务端墙钟**，不是 state 的陈旧 ``now``。
+
+    state["now"] 是任务起始时刻（客户端可带、且随任务推进变旧）；超时窗口的起点
+    必须是服务端记录的真实挂起时刻。
+    """
+    monkeypatch.setattr(
+        gate,
+        "write_rejudge_audit",
+        lambda record: ("audit-1", 1, "0" * 64),
+    )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
+    graph = workflow.build_graph(checkpointer=MemorySaver())
+    thread = _thread_config()
+
+    suspended = graph.invoke(_approval_state(), thread)
+    assert "__interrupt__" in suspended
+
+    payload = suspended["__interrupt__"][0].value
+    assert payload["submitted_at"] == _WALL_CLOCK, "挂起时刻必须取服务端墙钟"
+    assert payload["submitted_at"] != _NOW, "挂起时刻不得取 state['now']（任务起始时刻）"
+
+
+def test_missing_server_suspend_record_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """拿不到服务端挂起记录 → **fail-closed**（视为过期，不放行）。
+
+    不得回退成「按当前时刻起算」——那正是旧实现让超时永远不触发的漏洞。
+    """
+    monkeypatch.setattr(
+        gate,
+        "write_rejudge_audit",
+        lambda record: ("audit-1", 1, "0" * 64),
+    )
+    clock = _FakeClock(_WALL_CLOCK)
+    monkeypatch.setattr(gate, "_utc_now", clock, raising=False)
+    # 服务端留痕不可读（checkpointer 缺失 / 记录丢失）
+    monkeypatch.setattr(gate, "_server_submitted_at", lambda: None)
+    graph = workflow.build_graph(checkpointer=MemorySaver())
+    thread = _thread_config()
+
+    graph.invoke(_approval_state(), thread)
+    final = graph.invoke(Command(resume={"approved": True}), thread)
+
+    assert final["approval_status"] == "approval-expired", (
+        "无法证明未超时 → 不得放行（fail-closed）"
+    )
+    assert final["sendable_candidate_ids"] == []
+    assert final.get("sent", []) == []
 
 
 def test_rejected_resume_does_not_send(monkeypatch: pytest.MonkeyPatch) -> None:

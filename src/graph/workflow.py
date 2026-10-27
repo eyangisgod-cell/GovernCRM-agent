@@ -12,6 +12,10 @@
 - **红线②**：DENY 候选不到达 send——decision 只把 ``resolve_conflicts`` 的
   survivors（ALLOW）写进 ``sendable_candidate_ids``，全 DENY 时条件边直接结束。
 - **红线⑤**：零供应商依赖；CLI ``--dry-run`` 无 DB 无网络（send = 内存 mock）。
+- **熔断恢复的分组口径**（T-E6）：熔断器是**全局单例**，挂起队列里可能同时躺着
+  多个租户 / 多个任务组的候选；恢复结论按 ``(租户, 轨迹)`` 分组保留，恢复派发
+  **只消费当前 state 所属组**的放行候选——别的组候选留在熔断挂起队列（不是丢弃），
+  避免「恢复任务 B」把「任务 A」的候选错误派发出去。
 """
 
 from __future__ import annotations
@@ -121,6 +125,7 @@ class GraphState(TypedDict, total=False):
     dispatch_halted: bool
     dispatch_halt_reason: str
     pending_candidate_ids: list[str]
+    deferred_candidate_ids: list[str]
 
 
 def _visit(state: GraphState, node: str) -> list[str]:
@@ -340,6 +345,15 @@ def _mock_sent(state: GraphState, candidate_ids: Sequence[str]) -> list[dict[str
     ]
 
 
+def _dispatch_trace(state: GraphState) -> str:
+    """派发轨迹 id——熔断分组键 ``(租户, 轨迹)`` 的「轨迹」半边。
+
+    ``send`` 节点与恢复派发路径必须用**同一份**口径，否则分组匹配不上
+    （本组候选会被误判成「别的组的」→ 跨组误派发）。
+    """
+    return f"task-{state.get('task_id', 'task')}"
+
+
 def _send_node(state: GraphState) -> GraphState:
     """mock 发送：路径断言（红线④）→ 熔断检查（T-E6）→ 只发 ``sendable_candidate_ids``。
 
@@ -371,7 +385,7 @@ def _send_node(state: GraphState) -> GraphState:
         candidate_ids=[str(cid) for cid in state.get("sendable_candidate_ids", [])],
         context=_rejudge_context(state),
         tenant_id=_uuid_or_none(state.get("tenant_id")),
-        trace_id=f"task-{state.get('task_id', 'task')}",
+        trace_id=_dispatch_trace(state),
         task_id=_uuid_or_none(state.get("task_id")),
         worker_id=_uuid_or_none(state.get("worker_id")),
     )
@@ -396,20 +410,38 @@ def _dispatch_rejudged(
 ) -> GraphState:
     """把重判的**放行集合**交回派发路径（熔断感知 + 路径断言）。
 
+    **只派发本任务组**（跨组不串味）：熔断器是全局单例，恢复结论按
+    ``(租户, 轨迹)`` 分组；本函数只消费**当前 state 所属组**的放行候选——
+    别的任务 / 别的租户的候选**留在熔断挂起队列**（不是丢弃），等待它们各自的
+    任务恢复时再派发。
+
     两道闸门同样**不可绕过**：
 
     - **路径完整性断言**（红线④）：派发前仍断言必经节点；
     - **全局熔断开关**：熔断仍打开 → **零派发**，候选留在挂起队列。
     """
-    candidate_ids = list(outcome.sendable_candidate_ids)
+    tenant = breaker.resolve_tenant(_uuid_or_none(state.get("tenant_id")))
+    trace = _dispatch_trace(state)
+    group = outcome.group_for(tenant_id=tenant, trace_id=trace)
+    candidate_ids = list(group.sendable_candidate_ids) if group is not None else []
+    group_denied = list(group.denied) if group is not None else []
+    # 其它组的放行候选：本任务**不派发**它们，但必须让上层看得见（不静默消失）。
+    deferred = [
+        candidate_id
+        for other in outcome.groups
+        if other is not group
+        for candidate_id in other.sendable_candidate_ids
+    ]
+
     update: GraphState = {
-        "denied_candidate_ids": [item.candidate_id for item in outcome.denied],
-        "suppressed_rule_ids": [item.rule_id for item in outcome.denied],
+        "denied_candidate_ids": [item.candidate_id for item in group_denied],
+        "suppressed_rule_ids": [item.rule_id for item in group_denied],
         "denied_details": [
             {"candidate_id": item.candidate_id, "rule_id": item.rule_id, "reason": item.reason}
-            for item in outcome.denied
+            for item in group_denied
         ],
         "rule_version": outcome.rule_version,
+        "deferred_candidate_ids": deferred,
     }
 
     # 红线④：派发同样不得绕过必经节点。
@@ -433,7 +465,7 @@ def _dispatch_rejudged(
         candidate_ids=candidate_ids,
         context=_rejudge_context(state),
         tenant_id=_uuid_or_none(state.get("tenant_id")),
-        trace_id=f"task-{state.get('task_id', 'task')}",
+        trace_id=trace,
         task_id=_uuid_or_none(state.get("task_id")),
         worker_id=_uuid_or_none(state.get("worker_id")),
     )
@@ -466,9 +498,13 @@ def resume_and_dispatch(
 ) -> GraphState:
     """熔断恢复 → 重判 → **把放行集合交回派发路径**（架构 v5.2:614 / ADR-030）。
 
-    恢复的完整闭环：**重判结论 → 派发**。重判放行的候选（``sendable_candidate_ids``）
-    由本函数送进**同一套熔断感知的派发逻辑**（``before_dispatch`` + mock 发送），
-    不再出现「重判出可发集合却无人派发 = 候选静默消失」。
+    恢复的完整闭环：**重判结论 → 派发**。重判放行的候选由本函数送进**同一套
+    熔断感知的派发逻辑**（``before_dispatch`` + mock 发送），不再出现
+    「重判出可发集合却无人派发 = 候选静默消失」。
+
+    **只派发本任务组**：熔断器是全局单例，恢复结论按 ``(租户, 轨迹)`` 分组；
+    本函数只派发**当前 state 所属组**的放行候选，别组的候选留在熔断挂起队列
+    （见返回值的 ``pending_candidate_ids`` / ``deferred_candidate_ids``）。
 
     返回值是新的 ``GraphState``（含 ``sent`` / 放行与拒绝留痕 / ``rule_version``）。
     """
